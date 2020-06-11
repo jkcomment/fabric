@@ -10,18 +10,20 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"github.com/hyperledger/fabric/orderer/common/types"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"code.cloudfoundry.org/clock"
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
+	"github.com/hyperledger/fabric-protos-go/orderer/etcdraft"
+	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/consensus"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft"
@@ -41,12 +43,12 @@ const (
 	// DefaultSnapshotCatchUpEntries is the default number of entries
 	// to preserve in memory when a snapshot is taken. This is for
 	// slow followers to catch up.
-	DefaultSnapshotCatchUpEntries = uint64(20)
+	DefaultSnapshotCatchUpEntries = uint64(4)
 
 	// DefaultSnapshotIntervalSize is the default snapshot interval. It is
 	// used if SnapshotIntervalSize is not provided in channel config options.
 	// It is needed to enforce snapshot being set.
-	DefaultSnapshotIntervalSize = 20 * MEGABYTE // 20 MB
+	DefaultSnapshotIntervalSize = 16 * MEGABYTE
 
 	// DefaultEvictionSuspicion is the threshold that a node will start
 	// suspecting its own eviction if it has been leaderless for this
@@ -191,6 +193,10 @@ type Chain struct {
 	logger  *flogging.FabricLogger
 
 	periodicChecker *PeriodicCheck
+
+	haltCallback func()
+	// BCCSP instane
+	CryptoProvider bccsp.BCCSP
 }
 
 // NewChain constructs a chain object.
@@ -199,8 +205,11 @@ func NewChain(
 	opts Options,
 	conf Configurator,
 	rpc RPC,
+	cryptoProvider bccsp.BCCSP,
 	f CreateBlockPuller,
-	observeC chan<- raft.SoftState) (*Chain, error) {
+	haltCallback func(),
+	observeC chan<- raft.SoftState,
+) (*Chain, error) {
 
 	lg := opts.Logger.With("channel", support.ChannelID(), "node", opts.RaftID)
 
@@ -258,6 +267,7 @@ func NewChain(
 		confState:        cc,
 		createPuller:     f,
 		clock:            opts.Clock,
+		haltCallback:     haltCallback,
 		Metrics: &Metrics{
 			ClusterSize:             opts.Metrics.ClusterSize.With("channel", support.ChannelID()),
 			IsLeader:                opts.Metrics.IsLeader.With("channel", support.ChannelID()),
@@ -270,8 +280,9 @@ func NewChain(
 			NormalProposalsReceived: opts.Metrics.NormalProposalsReceived.With("channel", support.ChannelID()),
 			ConfigProposalsReceived: opts.Metrics.ConfigProposalsReceived.With("channel", support.ChannelID()),
 		},
-		logger: lg,
-		opts:   opts,
+		logger:         lg,
+		opts:           opts,
+		CryptoProvider: cryptoProvider,
 	}
 
 	// Sets initial values for metrics
@@ -416,6 +427,10 @@ func (c *Chain) Halt() {
 		return
 	}
 	<-c.doneC
+
+	if c.haltCallback != nil {
+		c.haltCallback()
+	}
 }
 
 func (c *Chain) isRunning() error {
@@ -852,8 +867,6 @@ func (c *Chain) propose(ch chan<- *common.Block, bc *blockCreator, batches ...[]
 
 		c.blockInflight++
 	}
-
-	return
 }
 
 func (c *Chain) catchUp(snap *raftpb.Snapshot) error {
@@ -928,7 +941,7 @@ func (c *Chain) detectConfChange(block *common.Block) *MembershipChanges {
 		c.sizeLimit = configMetadata.Options.SnapshotIntervalSize
 	}
 
-	changes, err := ComputeMembershipChanges(c.opts.BlockMetadata, c.opts.Consenters, configMetadata.Consenters)
+	changes, err := ComputeMembershipChanges(c.opts.BlockMetadata, c.opts.Consenters, configMetadata.Consenters, c.support.SharedConfig())
 	if err != nil {
 		c.logger.Panicf("illegal configuration change detected: %s", err)
 	}
@@ -1048,8 +1061,6 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 			c.logger.Warnf("Snapshotting is in progress, it is very likely that SnapshotIntervalSize is too small")
 		}
 	}
-
-	return
 }
 
 func (c *Chain) gc() {
@@ -1292,7 +1303,7 @@ func (c *Chain) ValidateConsensusMetadata(oldMetadataBytes, newMetadataBytes []b
 	// create the dummy parameters for ComputeMembershipChanges
 	dummyOldBlockMetadata, _ := ReadBlockMetadata(nil, oldMetadata)
 	dummyOldConsentersMap := CreateConsentersMap(dummyOldBlockMetadata, oldMetadata)
-	changes, err := ComputeMembershipChanges(dummyOldBlockMetadata, dummyOldConsentersMap, newMetadata.Consenters)
+	changes, err := ComputeMembershipChanges(dummyOldBlockMetadata, dummyOldConsentersMap, newMetadata.Consenters, c.support.SharedConfig())
 	if err != nil {
 		return err
 	}
@@ -1305,6 +1316,11 @@ func (c *Chain) ValidateConsensusMetadata(oldMetadataBytes, newMetadataBytes []b
 	return nil
 }
 
+// StatusReport returns the ClusterRelation & Status
+func (c *Chain) StatusReport() (types.ClusterRelation, types.Status) {
+	return types.ClusterRelationMember, types.StatusActive
+}
+
 func (c *Chain) suspectEviction() bool {
 	if c.isRunning() != nil {
 		return false
@@ -1314,8 +1330,13 @@ func (c *Chain) suspectEviction() bool {
 }
 
 func (c *Chain) newEvictionSuspector() *evictionSuspector {
+	consenterCertificate := &ConsenterCertificate{
+		ConsenterCertificate: c.opts.Cert,
+		CryptoProvider:       c.CryptoProvider,
+	}
+
 	return &evictionSuspector{
-		amIInChannel:               ConsenterCertificate(c.opts.Cert).IsConsenterOfChannel,
+		amIInChannel:               consenterCertificate.IsConsenterOfChannel,
 		evictionSuspicionThreshold: c.opts.EvictionSuspicion,
 		writeBlock:                 c.support.Append,
 		createPuller:               c.createPuller,

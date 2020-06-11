@@ -10,12 +10,12 @@ import (
 	"bytes"
 	"testing"
 
+	discprotos "github.com/hyperledger/fabric-protos-go/discovery"
+	"github.com/hyperledger/fabric-protos-go/msp"
 	"github.com/hyperledger/fabric/cmd/common"
 	. "github.com/hyperledger/fabric/discovery/client"
 	discovery "github.com/hyperledger/fabric/discovery/cmd"
 	"github.com/hyperledger/fabric/discovery/cmd/mocks"
-	discprotos "github.com/hyperledger/fabric/protos/discovery"
-	"github.com/hyperledger/fabric/protos/msp"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -141,6 +141,22 @@ func TestEndorserCmd(t *testing.T) {
 
 		err := cmd.Execute(common.Config{})
 		assert.Contains(t, err.Error(), "a collection specified chaincode ourcc but it wasn't specified with a chaincode flag")
+	})
+
+	t.Run("Endorsement query with noPrivateReads that aren't mapped to any chaincode(s)", func(t *testing.T) {
+		chaincodes := []string{"mycc"}
+		noPrivateReads := []string{"yourcc"}
+
+		stub := &mocks.Stub{}
+		cmd := discovery.NewEndorsersCmd(stub, parser)
+		cmd.SetChannel(&channel)
+		cmd.SetServer(&server)
+		cmd.SetChaincodes(&chaincodes)
+		cmd.SetNoPrivateReads(&noPrivateReads)
+		stub.On("Send", server, mock.Anything, mock.Anything).Return(nil, nil).Once()
+
+		err := cmd.Execute(common.Config{})
+		assert.Contains(t, err.Error(), "chaincode yourcc is specified as not containing private data reads but should be explicitly defined via a chaincode flag")
 	})
 }
 

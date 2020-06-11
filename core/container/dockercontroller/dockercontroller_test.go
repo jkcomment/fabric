@@ -20,6 +20,7 @@ import (
 	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/flogging/floggingtest"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
 	"github.com/hyperledger/fabric/common/metrics/metricsfakes"
@@ -27,7 +28,6 @@ import (
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
 	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/hyperledger/fabric/core/container/dockercontroller/mock"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/stretchr/testify/assert"
@@ -63,7 +63,7 @@ func TestIntegrationPath(t *testing.T) {
 		DockerVM: &dc,
 	}, instance)
 
-	err = dc.Start(ccid, "NODE", &ccintf.PeerConnection{
+	err = dc.Start(ccid, "GOLANG", &ccintf.PeerConnection{
 		Address: "peer-address",
 	})
 	require.NoError(t, err)
@@ -71,6 +71,16 @@ func TestIntegrationPath(t *testing.T) {
 	err = dc.Stop(ccid)
 	require.NoError(t, err)
 }
+
+var expectedNodeStartScript = `
+set -e
+if [ -x /chaincode/start.sh ]; then
+	/chaincode/start.sh --peer.address peer-address
+else
+	cd /usr/local/src
+	npm start -- --peer.address peer-address
+fi
+`
 
 func TestGetArgs(t *testing.T) {
 	tests := []struct {
@@ -81,7 +91,7 @@ func TestGetArgs(t *testing.T) {
 	}{
 		{"golang-chaincode", pb.ChaincodeSpec_GOLANG, []string{"chaincode", "-peer.address=peer-address"}, ""},
 		{"java-chaincode", pb.ChaincodeSpec_JAVA, []string{"/root/chaincode-java/start", "--peerAddress", "peer-address"}, ""},
-		{"node-chaincode", pb.ChaincodeSpec_NODE, []string{"/bin/sh", "-c", "cd /usr/local/src; npm start -- --peer.address peer-address"}, ""},
+		{"node-chaincode", pb.ChaincodeSpec_NODE, []string{"/bin/sh", "-c", expectedNodeStartScript}, ""},
 		{"unknown-chaincode", pb.ChaincodeSpec_Type(999), []string{}, "unknown chaincodeType: 999"},
 	}
 	for _, tc := range tests {
@@ -100,11 +110,12 @@ func TestGetArgs(t *testing.T) {
 func TestGetEnv(t *testing.T) {
 	vm := &DockerVM{
 		LoggingEnv: []string{"LOG_ENV=foo"},
+		MSPID:      "mspid",
 	}
 
 	t.Run("nil TLS config", func(t *testing.T) {
 		env := vm.GetEnv("test", nil)
-		assert.Equal(t, []string{"CORE_CHAINCODE_ID_NAME=test", "LOG_ENV=foo", "CORE_PEER_TLS_ENABLED=false"}, env)
+		assert.Equal(t, []string{"CORE_CHAINCODE_ID_NAME=test", "LOG_ENV=foo", "CORE_PEER_TLS_ENABLED=false", "CORE_PEER_LOCALMSPID=mspid"}, env)
 	})
 
 	t.Run("real TLS config", func(t *testing.T) {
@@ -119,7 +130,10 @@ func TestGetEnv(t *testing.T) {
 			"CORE_PEER_TLS_ENABLED=true",
 			"CORE_TLS_CLIENT_KEY_PATH=/etc/hyperledger/fabric/client.key",
 			"CORE_TLS_CLIENT_CERT_PATH=/etc/hyperledger/fabric/client.crt",
+			"CORE_TLS_CLIENT_KEY_FILE=/etc/hyperledger/fabric/client_pem.key",
+			"CORE_TLS_CLIENT_CERT_FILE=/etc/hyperledger/fabric/client_pem.crt",
 			"CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/peer.crt",
+			"CORE_PEER_LOCALMSPID=mspid",
 		}, env)
 	})
 }
@@ -211,14 +225,16 @@ func Test_streamOutput(t *testing.T) {
 	gt.Eventually(opts.Success).Should(BeClosed())
 
 	fmt.Fprintf(opts.OutputStream, "message-one\n")
-	fmt.Fprintf(opts.OutputStream, "message-two") // does not get written
+	fmt.Fprintf(opts.OutputStream, "message-two") // does not get written until after stream closed
 	gt.Eventually(containerRecorder).Should(gbytes.Say("message-one"))
 	gt.Consistently(containerRecorder.Entries).Should(HaveLen(1))
 
 	close(errCh)
+
 	gt.Eventually(recorder).Should(gbytes.Say("Container container-name has closed its IO channel"))
 	gt.Consistently(recorder.Entries).Should(HaveLen(1))
-	gt.Consistently(containerRecorder.Entries).Should(HaveLen(1))
+	gt.Eventually(containerRecorder).Should(gbytes.Say("message-two"))
+	gt.Consistently(containerRecorder.Entries).Should(HaveLen(2))
 }
 
 func Test_BuildMetric(t *testing.T) {
@@ -312,37 +328,37 @@ func TestGetVMNameForDocker(t *testing.T) {
 			name:           "mycc",
 			vm:             &DockerVM{NetworkID: "dev", PeerID: "peer0"},
 			ccid:           "mycc:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-peer0-mycc:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-peer0-mycc-1.0")))),
 		},
 		{
 			name:           "mycc-nonetworkid",
 			vm:             &DockerVM{PeerID: "peer1"},
 			ccid:           "mycc:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "peer1-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("peer1-mycc:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "peer1-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("peer1-mycc-1.0")))),
 		},
 		{
 			name:           "myCC-UCids",
 			vm:             &DockerVM{NetworkID: "Dev", PeerID: "Peer0"},
 			ccid:           "myCC:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("Dev-Peer0-myCC:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("Dev-Peer0-myCC-1.0")))),
 		},
 		{
 			name:           "myCC-idsWithSpecialChars",
 			vm:             &DockerVM{NetworkID: "Dev$dev", PeerID: "Peer*0"},
 			ccid:           "myCC:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "dev-dev-peer-0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("Dev$dev-Peer*0-myCC:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "dev-dev-peer-0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("Dev$dev-Peer*0-myCC-1.0")))),
 		},
 		{
 			name:           "mycc-nopeerid",
 			vm:             &DockerVM{NetworkID: "dev"},
 			ccid:           "mycc:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "dev-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-mycc:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "dev-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-mycc-1.0")))),
 		},
 		{
 			name:           "myCC-LCids",
 			vm:             &DockerVM{NetworkID: "dev", PeerID: "peer0"},
 			ccid:           "myCC:1.0",
-			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-peer0-myCC:1.0")))),
+			expectedOutput: fmt.Sprintf("%s-%s", "dev-peer0-mycc-1.0", hex.EncodeToString(util.ComputeSHA256([]byte("dev-peer0-myCC-1.0")))),
 		},
 	}
 
@@ -360,7 +376,7 @@ func TestGetVMName(t *testing.T) {
 			name:           "myCC-preserveCase",
 			vm:             &DockerVM{NetworkID: "Dev", PeerID: "Peer0"},
 			ccid:           "myCC:1.0",
-			expectedOutput: fmt.Sprintf("%s", "Dev-Peer0-myCC-1.0"),
+			expectedOutput: "Dev-Peer0-myCC-1.0",
 		},
 	}
 
@@ -491,6 +507,7 @@ type InMemBuilder struct{}
 func (imb InMemBuilder) Build() (io.Reader, error) {
 	buf := &bytes.Buffer{}
 	fmt.Fprintln(buf, "FROM busybox:latest")
+	fmt.Fprintln(buf, `RUN ln -s /bin/true /bin/chaincode`)
 	fmt.Fprintln(buf, `CMD ["tail", "-f", "/dev/null"]`)
 
 	startTime := time.Now()
@@ -508,12 +525,4 @@ func (imb InMemBuilder) Build() (io.Reader, error) {
 	tr.Close()
 	gw.Close()
 	return inputbuf, nil
-}
-
-type mockBuilder struct {
-	buildFunc func() (io.Reader, error)
-}
-
-func (m *mockBuilder) Build() (io.Reader, error) {
-	return m.buildFunc()
 }

@@ -11,10 +11,11 @@ import (
 	"fmt"
 
 	"github.com/golang/protobuf/proto"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	lb "github.com/hyperledger/fabric-protos-go/peer/lifecycle"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/internal/peer/lifecycle/chaincode"
 	"github.com/hyperledger/fabric/internal/peer/lifecycle/chaincode/mock"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
@@ -89,6 +90,7 @@ var _ = Describe("QueryInstalled", func() {
 					},
 				}
 				json, err := json.MarshalIndent(expectedOutput, "", "\t")
+				Expect(err).NotTo(HaveOccurred())
 				Eventually(installedQuerier.Writer).Should(gbytes.Say(fmt.Sprintf(`\Q%s\E`, string(json))))
 			})
 		})
@@ -100,8 +102,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("failed to create proposal: failed to serialize identity: cafe"))
+				Expect(err).To(MatchError("failed to create proposal: failed to serialize identity: cafe"))
 			})
 		})
 
@@ -112,8 +113,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("failed to create signed proposal: tea"))
+				Expect(err).To(MatchError("failed to create signed proposal: tea"))
 			})
 		})
 
@@ -124,8 +124,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("failed to endorse proposal: latte"))
+				Expect(err).To(MatchError("failed to endorse proposal: latte"))
 			})
 		})
 
@@ -137,8 +136,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("received nil proposal response"))
+				Expect(err).To(MatchError("received nil proposal response"))
 			})
 		})
 
@@ -150,8 +148,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("received proposal response with nil response"))
+				Expect(err).To(MatchError("received proposal response with nil response"))
 			})
 		})
 
@@ -166,8 +163,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(Equal("query failed with status: 500 - capuccino"))
+				Expect(err).To(MatchError("query failed with status: 500 - capuccino"))
 			})
 		})
 
@@ -182,19 +178,20 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := installedQuerier.Query()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("failed to unmarshal proposal response's response payload"))
+				Expect(err).To(MatchError(ContainSubstring("failed to unmarshal proposal response's response payload")))
 			})
 		})
 	})
 
 	Describe("QueryInstalledCmd", func() {
-		var (
-			queryInstalledCmd *cobra.Command
-		)
+		var queryInstalledCmd *cobra.Command
 
 		BeforeEach(func() {
-			queryInstalledCmd = chaincode.QueryInstalledCmd(nil)
+			cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+			Expect(err).To(BeNil())
+			queryInstalledCmd = chaincode.QueryInstalledCmd(nil, cryptoProvider)
+			queryInstalledCmd.SilenceErrors = true
+			queryInstalledCmd.SilenceUsage = true
 			queryInstalledCmd.SetArgs([]string{
 				"--peerAddresses=querypeer1",
 				"--tlsRootCertFiles=tls1",
@@ -207,8 +204,7 @@ var _ = Describe("QueryInstalled", func() {
 
 		It("attempts to connect to the endorser", func() {
 			err := queryInstalledCmd.Execute()
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("failed to retrieve endorser client"))
+			Expect(err).To(MatchError(ContainSubstring("failed to retrieve endorser client")))
 		})
 
 		Context("when more than one peer address is provided", func() {
@@ -223,8 +219,7 @@ var _ = Describe("QueryInstalled", func() {
 
 			It("returns an error", func() {
 				err := queryInstalledCmd.Execute()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("failed to validate peer connection parameters"))
+				Expect(err).To(MatchError(ContainSubstring("failed to validate peer connection parameters")))
 			})
 		})
 	})

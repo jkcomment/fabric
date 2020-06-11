@@ -9,8 +9,9 @@ package service
 import (
 	"reflect"
 
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/protos/peer"
+	"github.com/hyperledger/fabric/msp"
 )
 
 // Config enumerates the configuration methods required by gossip
@@ -30,7 +31,7 @@ type Config interface {
 
 // ConfigProcessor receives config updates
 type ConfigProcessor interface {
-	// ProcessConfig should be invoked whenever a channel's configuration is initialized or updated
+	// ProcessConfigUpdate should be invoked whenever a channel's configuration is initialized or updated
 	ProcessConfigUpdate(config Config)
 }
 
@@ -41,7 +42,6 @@ type configStore struct {
 
 type configEventReceiver interface {
 	updateAnchors(config Config)
-	updateEndpoints(chainID string, endpoints []string)
 }
 
 type configEventer struct {
@@ -80,7 +80,6 @@ func (ce *configEventer) ProcessConfigUpdate(config Config) {
 		logger.Debugf("Calling out because config was updated for channel %s", config.ChannelID())
 		ce.receiver.updateAnchors(config)
 	}
-	ce.receiver.updateEndpoints(config.ChannelID(), config.OrdererAddresses())
 }
 
 func cloneOrgConfig(src map[string]channelconfig.ApplicationOrg) map[string]channelconfig.ApplicationOrg {
@@ -111,4 +110,8 @@ func (ag *appGrp) MSPID() string {
 
 func (ag *appGrp) AnchorPeers() []*peer.AnchorPeer {
 	return ag.anchorPeers
+}
+
+func (ag *appGrp) MSP() msp.MSP {
+	return nil
 }

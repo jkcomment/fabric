@@ -10,19 +10,18 @@ import (
 	"sync"
 	"testing"
 
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/discovery"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	gmetricsmocks "github.com/hyperledger/fabric/gossip/metrics/mocks"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/state/mocks"
-	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func TestMetrics(t *testing.T) {
-	t.Parallel()
 	mc := &mockCommitter{Mock: &mock.Mock{}}
 	mc.On("CommitLegacy", mock.Anything).Return(nil)
 	mc.On("LedgerHeight", mock.Anything).Return(uint64(100), nil).Twice()
@@ -68,7 +67,7 @@ func TestMetrics(t *testing.T) {
 
 	// ensure the right height was reported
 	assert.Equal(t,
-		[]string{"channel", "testchainid"},
+		[]string{"channel", "testchannelid"},
 		testMetricProvider.FakeHeightGauge.WithArgsForCall(0),
 	)
 	assert.EqualValues(t,
@@ -78,11 +77,11 @@ func TestMetrics(t *testing.T) {
 
 	// after push or pop payload buffer size should be reported
 	assert.Equal(t,
-		[]string{"channel", "testchainid"},
+		[]string{"channel", "testchannelid"},
 		testMetricProvider.FakePayloadBufferSizeGauge.WithArgsForCall(0),
 	)
 	assert.Equal(t,
-		[]string{"channel", "testchainid"},
+		[]string{"channel", "testchannelid"},
 		testMetricProvider.FakePayloadBufferSizeGauge.WithArgsForCall(1),
 	)
 	// both 0 and 1 as size can be reported, depends on timing

@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	mockmsp "github.com/hyperledger/fabric/common/mocks/msp"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/hyperledger/fabric/protoutil/fakes"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +33,7 @@ func TestGetPayloads(t *testing.T) {
 		Extension: ccActionBytes,
 	}
 	proposalResponseBytes, err := proto.Marshal(proposalResponsePayload)
+	assert.NoError(t, err)
 	ccActionPayload := &pb.ChaincodeActionPayload{
 		Action: &pb.ChaincodeEndorsedAction{
 			ProposalResponsePayload: proposalResponseBytes,
@@ -50,6 +51,7 @@ func TestGetPayloads(t *testing.T) {
 	proposalResponseBytes, err = proto.Marshal(&pb.ProposalResponsePayload{
 		Extension: nil,
 	})
+	assert.NoError(t, err)
 	ccActionPayloadBytes, _ = proto.Marshal(&pb.ChaincodeActionPayload{
 		Action: &pb.ChaincodeEndorsedAction{
 			ProposalResponsePayload: proposalResponseBytes,
@@ -121,8 +123,8 @@ func TestCreateSignedTx(t *testing.T) {
 	var err error
 	prop := &pb.Proposal{}
 
-	signID, err := mockmsp.NewNoopMsp().GetDefaultSigningIdentity()
-	assert.NoError(t, err, "Unexpected error getting signing identity")
+	signID := &fakes.SignerSerializer{}
+	signID.SerializeReturns([]byte("signer"), nil)
 	signerBytes, err := signID.Serialize()
 	assert.NoError(t, err, "Unexpected error serializing signing identity")
 
@@ -240,8 +242,8 @@ func TestCreateSignedTxStatus(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	signingID, err := mockmsp.NewNoopMsp().GetDefaultSigningIdentity()
-	assert.NoError(t, err)
+	signingID := &fakes.SignerSerializer{}
+	signingID.SerializeReturns([]byte("signer"), nil)
 	serializedSigningID, err := signingID.Serialize()
 	assert.NoError(t, err)
 	serializedSignatureHeader, err := proto.Marshal(&cb.SignatureHeader{
@@ -343,8 +345,10 @@ func TestGetSignedProposal(t *testing.T) {
 	var signedProp *pb.SignedProposal
 	var err error
 
-	signID, err := mockmsp.NewNoopMsp().GetDefaultSigningIdentity()
-	assert.NoError(t, err, "Unexpected error getting signing identity")
+	sig := []byte("signature")
+
+	signID := &fakes.SignerSerializer{}
+	signID.SignReturns(sig, nil)
 
 	prop := &pb.Proposal{}
 	propBytes, _ := proto.Marshal(prop)
@@ -352,7 +356,7 @@ func TestGetSignedProposal(t *testing.T) {
 	assert.NoError(t, err, "Unexpected error getting signed proposal")
 	assert.Equal(t, propBytes, signedProp.ProposalBytes,
 		"Proposal bytes did not match expected value")
-	assert.Equal(t, []byte("signature"), signedProp.Signature,
+	assert.Equal(t, sig, signedProp.Signature,
 		"Signature did not match expected value")
 
 	_, err = protoutil.GetSignedProposal(nil, signID)
@@ -368,7 +372,7 @@ func TestMockSignedEndorserProposalOrPanic(t *testing.T) {
 
 	ccProposal := &pb.ChaincodeProposalPayload{}
 	cis := &pb.ChaincodeInvocationSpec{}
-	chainID := "testchainid"
+	chainID := "testchannelid"
 	sig := []byte("signature")
 	creator := []byte("creator")
 	cs := &pb.ChaincodeSpec{
@@ -398,10 +402,10 @@ func TestMockSignedEndorserProposal2OrPanic(t *testing.T) {
 
 	ccProposal := &pb.ChaincodeProposalPayload{}
 	cis := &pb.ChaincodeInvocationSpec{}
-	chainID := "testchainid"
+	chainID := "testchannelid"
 	sig := []byte("signature")
-	signID, err := mockmsp.NewNoopMsp().GetDefaultSigningIdentity()
-	assert.NoError(t, err, "Unexpected error getting signing identity")
+	signID := &fakes.SignerSerializer{}
+	signID.SignReturns(sig, nil)
 
 	signedProp, prop = protoutil.MockSignedEndorserProposal2OrPanic(chainID,
 		&pb.ChaincodeSpec{}, signID)
@@ -410,7 +414,7 @@ func TestMockSignedEndorserProposal2OrPanic(t *testing.T) {
 	propBytes, _ := proto.Marshal(prop)
 	assert.Equal(t, propBytes, signedProp.ProposalBytes,
 		"Proposal bytes do not match expected value")
-	err = proto.Unmarshal(prop.Payload, ccProposal)
+	err := proto.Unmarshal(prop.Payload, ccProposal)
 	assert.NoError(t, err, "Expected ChaincodeProposalPayload")
 	err = proto.Unmarshal(ccProposal.Input, cis)
 	assert.NoError(t, err, "Expected ChaincodeInvocationSpec")
@@ -442,12 +446,9 @@ func TestGetProposalHash2(t *testing.T) {
 	}
 	propHash, err := protoutil.GetProposalHash2(hdr, []byte("ccproppayload"))
 	assert.NoError(t, err, "Unexpected error getting hash2 for proposal")
-	t.Logf("%x", propHash)
-	assert.Equal(t, expectedHash, propHash,
-		"Proposal hash did not match expected hash")
+	assert.Equal(t, expectedHash, propHash, "Proposal hash did not match expected hash")
 
-	propHash, err = protoutil.GetProposalHash2(&cb.Header{},
-		[]byte("ccproppayload"))
+	_, err = protoutil.GetProposalHash2(&cb.Header{}, []byte("ccproppayload"))
 	assert.Error(t, err, "Expected error with nil arguments")
 }
 
@@ -463,21 +464,18 @@ func TestGetProposalHash1(t *testing.T) {
 
 	propHash, err := protoutil.GetProposalHash1(hdr, ccProposal)
 	assert.NoError(t, err, "Unexpected error getting hash for proposal")
-	t.Logf("%x", propHash)
-	assert.Equal(t, expectedHash, propHash,
-		"Proposal hash did not match expected hash")
+	assert.Equal(t, expectedHash, propHash, "Proposal hash did not match expected hash")
 
-	propHash, err = protoutil.GetProposalHash1(hdr, []byte("ccproppayload"))
-	assert.Error(t, err,
-		"Expected error with malformed chaincode proposal payload")
+	_, err = protoutil.GetProposalHash1(hdr, []byte("ccproppayload"))
+	assert.Error(t, err, "Expected error with malformed chaincode proposal payload")
 
-	propHash, err = protoutil.GetProposalHash1(&cb.Header{}, []byte("ccproppayload"))
+	_, err = protoutil.GetProposalHash1(&cb.Header{}, []byte("ccproppayload"))
 	assert.Error(t, err, "Expected error with nil arguments")
 }
 
 func TestCreateProposalResponseFailure(t *testing.T) {
 	// create a proposal from a ChaincodeInvocationSpec
-	prop, _, err := protoutil.CreateChaincodeProposal(cb.HeaderType_ENDORSER_TRANSACTION, testChainID, createCIS(), signerSerialized)
+	prop, _, err := protoutil.CreateChaincodeProposal(cb.HeaderType_ENDORSER_TRANSACTION, testChannelID, createCIS(), signerSerialized)
 	if err != nil {
 		t.Fatalf("Could not create chaincode proposal, err %s\n", err)
 		return

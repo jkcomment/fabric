@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -245,7 +245,8 @@ func TestGlobalConfig(t *testing.T) {
 	viper.Set("peer.authentication.timewindow", "15m")
 	viper.Set("peer.tls.enabled", "false")
 	viper.Set("peer.networkId", "testNetwork")
-	viper.Set("peer.limits.concurrency.qscc", 5000)
+	viper.Set("peer.limits.concurrency.endorserService", 2500)
+	viper.Set("peer.limits.concurrency.deliverService", 2500)
 	viper.Set("peer.discovery.enabled", true)
 	viper.Set("peer.profile.enabled", false)
 	viper.Set("peer.profile.listenAddress", "peer.authentication.timewindow")
@@ -279,7 +280,16 @@ func TestGlobalConfig(t *testing.T) {
 	viper.Set("metrics.statsd.prefix", "testPrefix")
 
 	viper.Set("chaincode.pull", false)
-	viper.Set("chaincode.externalBuilders", []string{"relative/plugin_dir", "/absolute/plugin_dir"})
+	viper.Set("chaincode.externalBuilders", &[]ExternalBuilder{
+		{
+			Path: "relative/plugin_dir",
+			Name: "relative",
+		},
+		{
+			Path: "/absolute/plugin_dir",
+			Name: "absolute",
+		},
+	})
 
 	coreConfig, err := GlobalConfig()
 	assert.NoError(t, err)
@@ -292,7 +302,8 @@ func TestGlobalConfig(t *testing.T) {
 		PeerAddress:                           "localhost:8080",
 		PeerID:                                "testPeerID",
 		NetworkID:                             "testNetwork",
-		LimitsConcurrencyQSCC:                 5000,
+		LimitsConcurrencyEndorserService:      2500,
+		LimitsConcurrencyDeliverService:       2500,
 		DiscoveryEnabled:                      true,
 		ProfileEnabled:                        false,
 		ProfileListenAddress:                  "peer.authentication.timewindow",
@@ -311,11 +322,16 @@ func TestGlobalConfig(t *testing.T) {
 		VMNetworkMode:        "TestingHost",
 
 		ChaincodePull: false,
-		ExternalBuilders: []string{
-			filepath.Join(cwd, "relative", "plugin_dir"),
-			"/absolute/plugin_dir",
+		ExternalBuilders: []ExternalBuilder{
+			{
+				Path: "relative/plugin_dir",
+				Name: "relative",
+			},
+			{
+				Path: "/absolute/plugin_dir",
+				Name: "absolute",
+			},
 		},
-
 		OperationsListenAddress:         "127.0.0.1:9443",
 		OperationsTLSEnabled:            false,
 		OperationsTLSCertFile:           filepath.Join(cwd, "test/tls/cert/file"),
@@ -356,4 +372,28 @@ func TestGlobalConfigDefault(t *testing.T) {
 	}
 
 	assert.Equal(t, expectedConfig, coreConfig)
+}
+
+func TestMissingExternalBuilderPath(t *testing.T) {
+	defer viper.Reset()
+	viper.Set("peer.address", "localhost:8080")
+	viper.Set("chaincode.externalBuilders", &[]ExternalBuilder{
+		{
+			Name: "testName",
+		},
+	})
+	_, err := GlobalConfig()
+	assert.EqualError(t, err, "invalid external builder configuration, path attribute missing in one or more builders")
+}
+
+func TestMissingExternalBuilderName(t *testing.T) {
+	defer viper.Reset()
+	viper.Set("peer.address", "localhost:8080")
+	viper.Set("chaincode.externalBuilders", &[]ExternalBuilder{
+		{
+			Path: "relative/plugin_dir",
+		},
+	})
+	_, err := GlobalConfig()
+	assert.EqualError(t, err, "external builder at path relative/plugin_dir has no name attribute")
 }

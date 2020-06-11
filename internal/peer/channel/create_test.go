@@ -20,13 +20,13 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
 	"github.com/hyperledger/fabric/core/config/configtest"
 	"github.com/hyperledger/fabric/internal/peer/common"
 	"github.com/hyperledger/fabric/internal/peer/common/mock"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	cb "github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -639,7 +639,7 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 	var err error
 
 	// Error case 1
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.Error(t, err, "Error expected for nil payload")
 	assert.Contains(t, err.Error(), "bad payload")
 
@@ -648,7 +648,7 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 	data, err1 := proto.Marshal(p)
 	assert.NoError(t, err1)
 	env = &cb.Envelope{Payload: data}
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.Error(t, err, "Error expected for bad payload header")
 	assert.Contains(t, err.Error(), "bad header")
 
@@ -658,7 +658,7 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 	data, err = proto.Marshal(p)
 	assert.NoError(t, err)
 	env = &cb.Envelope{Payload: data}
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.Error(t, err, "Error expected for bad channel header")
 	assert.Contains(t, err.Error(), "could not unmarshall channel header")
 
@@ -676,7 +676,7 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 	data, err = proto.Marshal(p)
 	assert.NoError(t, err)
 	env = &cb.Envelope{Payload: data}
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.Error(t, err, "Error expected for bad payload data")
 	assert.Contains(t, err.Error(), "Bad config update env")
 
@@ -691,7 +691,7 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 		0,
 		0)
 	assert.NoError(t, err)
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.EqualError(t, err, "bad signer header")
 
 	// Error case 6
@@ -705,6 +705,6 @@ func TestSanityCheckAndSignChannelCreateTx(t *testing.T) {
 		0,
 		0)
 	assert.NoError(t, err)
-	env, err = sanityCheckAndSignConfigTx(env, signer)
+	_, err = sanityCheckAndSignConfigTx(env, signer)
 	assert.EqualError(t, err, "signer failed to sign")
 }

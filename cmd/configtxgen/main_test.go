@@ -8,6 +8,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -15,8 +16,7 @@ import (
 
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/core/config/configtest"
-	"github.com/hyperledger/fabric/internal/configtxgen/configtxgentest"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -35,31 +35,38 @@ func TestMain(m *testing.M) {
 }
 
 func TestInspectMissing(t *testing.T) {
-	assert.Error(t, doInspectBlock("NonSenseBlockFileThatDoesn'tActuallyExist"), "Missing block")
+	assert.EqualError(t, doInspectBlock("NonSenseBlockFileThatDoesn'tActuallyExist"), "could not read block NonSenseBlockFileThatDoesn'tActuallyExist")
 }
 
 func TestInspectBlock(t *testing.T) {
 	blockDest := filepath.Join(tmpDir, "block")
 
-	config := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	config := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 
 	assert.NoError(t, doOutputBlock(config, "foo", blockDest), "Good block generation request")
 	assert.NoError(t, doInspectBlock(blockDest), "Good block inspection request")
 }
 
+func TestInspectBlockErr(t *testing.T) {
+	config := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
+
+	assert.EqualError(t, doOutputBlock(config, "foo", ""), "error writing genesis block: open : no such file or directory")
+	assert.EqualError(t, doInspectBlock(""), "could not read block ")
+}
+
 func TestMissingOrdererSection(t *testing.T) {
 	blockDest := filepath.Join(tmpDir, "block")
 
-	config := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	config := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	config.Orderer = nil
 
-	assert.Error(t, doOutputBlock(config, "foo", blockDest), "Missing orderer section")
+	assert.EqualError(t, doOutputBlock(config, "foo", blockDest), "refusing to generate block which is missing orderer section")
 }
 
 func TestMissingConsortiumSection(t *testing.T) {
 	blockDest := filepath.Join(tmpDir, "block")
 
-	config := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	config := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	config.Consortiums = nil
 
 	assert.NoError(t, doOutputBlock(config, "foo", blockDest), "Missing consortiums section")
@@ -68,29 +75,39 @@ func TestMissingConsortiumSection(t *testing.T) {
 func TestMissingConsortiumValue(t *testing.T) {
 	configTxDest := filepath.Join(tmpDir, "configtx")
 
-	config := configtxgentest.Load(genesisconfig.SampleSingleMSPChannelProfile)
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
 	config.Consortium = ""
 
-	assert.Error(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), "Missing Consortium value in Application Profile definition")
+	assert.EqualError(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), "config update generation failure: cannot define a new channel with no Consortium value")
+}
+
+func TestUnsuccessfulChannelTxFileCreation(t *testing.T) {
+	configTxDest := filepath.Join(tmpDir, "configtx")
+
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
+	assert.NoError(t, ioutil.WriteFile(configTxDest, []byte{}, 0440))
+	defer os.Remove(configTxDest)
+
+	assert.EqualError(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), fmt.Sprintf("error writing channel create tx: open %s: permission denied", configTxDest))
 }
 
 func TestMissingApplicationValue(t *testing.T) {
 	configTxDest := filepath.Join(tmpDir, "configtx")
 
-	config := configtxgentest.Load(genesisconfig.SampleSingleMSPChannelProfile)
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
 	config.Application = nil
 
-	assert.Error(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), "Missing Application value in Application Profile definition")
+	assert.EqualError(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), "could not generate default config template: channel template configs must contain an application section")
 }
 
 func TestInspectMissingConfigTx(t *testing.T) {
-	assert.Error(t, doInspectChannelCreateTx("ChannelCreateTxFileWhichDoesn'tReallyExist"), "Missing channel create tx file")
+	assert.EqualError(t, doInspectChannelCreateTx("ChannelCreateTxFileWhichDoesn'tReallyExist"), "could not read channel create tx: open ChannelCreateTxFileWhichDoesn'tReallyExist: no such file or directory")
 }
 
 func TestInspectConfigTx(t *testing.T) {
 	configTxDest := filepath.Join(tmpDir, "configtx")
 
-	config := configtxgentest.Load(genesisconfig.SampleSingleMSPChannelProfile)
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
 
 	assert.NoError(t, doOutputChannelCreateTx(config, nil, "foo", configTxDest), "Good outputChannelCreateTx generation request")
 	assert.NoError(t, doInspectChannelCreateTx(configTxDest), "Good configtx inspection request")
@@ -99,7 +116,7 @@ func TestInspectConfigTx(t *testing.T) {
 func TestGenerateAnchorPeersUpdate(t *testing.T) {
 	configTxDest := filepath.Join(tmpDir, "anchorPeerUpdate")
 
-	config := configtxgentest.Load(genesisconfig.SampleSingleMSPChannelProfile)
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
 
 	assert.NoError(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, genesisconfig.SampleOrgName), "Good anchorPeerUpdate request")
 }
@@ -107,17 +124,17 @@ func TestGenerateAnchorPeersUpdate(t *testing.T) {
 func TestBadAnchorPeersUpdates(t *testing.T) {
 	configTxDest := filepath.Join(tmpDir, "anchorPeerUpdate")
 
-	config := configtxgentest.Load(genesisconfig.SampleSingleMSPChannelProfile)
+	config := genesisconfig.Load(genesisconfig.SampleSingleMSPChannelProfile, configtest.GetDevConfigDir())
 
-	assert.Error(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, ""), "Bad anchorPeerUpdate request - asOrg empty")
+	assert.EqualError(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, ""), "must specify an organization to update the anchor peer for")
 
 	backupApplication := config.Application
 	config.Application = nil
-	assert.Error(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, genesisconfig.SampleOrgName), "Bad anchorPeerUpdate request")
+	assert.EqualError(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, genesisconfig.SampleOrgName), "cannot update anchor peers without an application section")
 	config.Application = backupApplication
 
 	config.Application.Organizations[0] = &genesisconfig.Organization{Name: "FakeOrg", ID: "FakeOrg"}
-	assert.Error(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, genesisconfig.SampleOrgName), "Bad anchorPeerUpdate request - fake org")
+	assert.EqualError(t, doOutputAnchorPeersUpdate(config, "foo", configTxDest, genesisconfig.SampleOrgName), "error parsing profile as channel group: could not create application group: failed to create application org: 1 - Error loading MSP configuration for org FakeOrg: unknown MSP type ''")
 }
 
 func TestConfigTxFlags(t *testing.T) {
@@ -132,12 +149,11 @@ func TestConfigTxFlags(t *testing.T) {
 
 	cleanup := configtest.SetDevFabricConfigPath(t)
 	defer cleanup()
-	devConfigDir, err := configtest.GetDevConfigDir()
-	assert.NoError(t, err, "failed to get dev config dir")
+	devConfigDir := configtest.GetDevConfigDir()
 
 	os.Args = []string{
 		"cmd",
-		"-channelID=testchainid",
+		"-channelID=testchannelid",
 		"-outputCreateChannelTx=" + configTxDest,
 		"-channelCreateTxBaseProfile=" + genesisconfig.SampleSingleMSPSoloProfile,
 		"-profile=" + genesisconfig.SampleSingleMSPChannelProfile,
@@ -149,7 +165,7 @@ func TestConfigTxFlags(t *testing.T) {
 
 	main()
 
-	_, err = os.Stat(configTxDest)
+	_, err := os.Stat(configTxDest)
 	assert.NoError(t, err, "Configtx file is written successfully")
 	_, err = os.Stat(configTxDestAnchorPeers)
 	assert.NoError(t, err, "Configtx anchor peers file is written successfully")
@@ -164,7 +180,7 @@ func TestBlockFlags(t *testing.T) {
 	}()
 	os.Args = []string{
 		"cmd",
-		"-channelID=testchainid",
+		"-channelID=testchannelid",
 		"-profile=" + genesisconfig.SampleSingleMSPSoloProfile,
 		"-outputBlock=" + blockDest,
 		"-inspectBlock=" + blockDest,
@@ -180,7 +196,7 @@ func TestBlockFlags(t *testing.T) {
 
 func TestPrintOrg(t *testing.T) {
 	factory.InitFactories(nil)
-	config := configtxgentest.LoadTopLevel()
+	config := genesisconfig.LoadTopLevel(configtest.GetDevConfigDir())
 
 	assert.NoError(t, doPrintOrg(config, genesisconfig.SampleOrgName), "Good org to print")
 

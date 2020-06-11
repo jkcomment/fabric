@@ -7,11 +7,12 @@ SPDX-License-Identifier: Apache-2.0
 package msgprocessor
 
 import (
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
+	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
-	cb "github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protoutil"
 
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
@@ -50,11 +51,11 @@ type StandardChannel struct {
 }
 
 // NewStandardChannel creates a new standard message processor
-func NewStandardChannel(support StandardChannelSupport, filters *RuleSet) *StandardChannel {
+func NewStandardChannel(support StandardChannelSupport, filters *RuleSet, bccsp bccsp.BCCSP) *StandardChannel {
 	return &StandardChannel{
 		filters:           filters,
 		support:           support,
-		maintenanceFilter: NewMaintenanceFilter(support),
+		maintenanceFilter: NewMaintenanceFilter(support, bccsp),
 	}
 }
 
@@ -117,14 +118,14 @@ func (s *StandardChannel) ProcessNormalMsg(env *cb.Envelope) (configSeq uint64, 
 // return the resulting config message and the configSeq the config was computed from.  If the config impetus message
 // is invalid, an error is returned.
 func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.Envelope, configSeq uint64, err error) {
-	logger.Debugf("Processing config update message for channel %s", s.support.ChannelID())
+	logger.Debugf("Processing config update message for existing channel %s", s.support.ChannelID())
 
 	// Call Sequence first.  If seq advances between proposal and acceptance, this is okay, and will cause reprocessing
 	// however, if Sequence is called last, then a success could be falsely attributed to a newer configSeq
 	seq := s.support.Sequence()
 	err = s.filters.Apply(env)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass initial checks")
 	}
 
 	configEnvelope, err := s.support.ProposeConfigUpdate(env)
@@ -144,12 +145,12 @@ func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.E
 	// check is negligible, as this is the reconfig path and not the normal path.
 	err = s.filters.Apply(config)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass final checks")
 	}
 
 	err = s.maintenanceFilter.Apply(config)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithMessage(err, "config update for existing channel did not pass maintenance checks")
 	}
 
 	return config, seq, nil

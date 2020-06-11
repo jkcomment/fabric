@@ -13,15 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
-	"github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -208,12 +207,12 @@ var _ = Describe("EndToEndACL", func() {
 			By("evaluating " + policyName + " for a permitted subject")
 			sess, err := network.PeerAdminSession(org1Peer0, chaincodeQuery)
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(sess, 30*time.Second).Should(gexec.Exit(0))
+			Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit(0))
 
 			By("evaluating " + policyName + " for a forbidden subject")
 			sess, err = network.PeerAdminSession(org2Peer0, chaincodeQuery)
 			Expect(err).NotTo(HaveOccurred())
-			Eventually(sess, 30*time.Second).Should(gexec.Exit())
+			Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit())
 			Expect(sess.Err).To(gbytes.Say(fmt.Sprintf(`access denied for \[%s\]\[%s\](.*)signature set did not satisfy policy`, operation, "testchannel")))
 		}
 
@@ -243,20 +242,17 @@ var _ = Describe("EndToEndACL", func() {
 		chaincode = nwo.Chaincode{
 			Name:                "mycc",
 			Version:             "0.0",
-			Path:                "github.com/hyperledger/fabric/integration/chaincode/simple/cmd",
-			Lang:                "golang",
+			Path:                components.Build("github.com/hyperledger/fabric/integration/chaincode/simple/cmd"),
+			Lang:                "binary",
 			PackageFile:         filepath.Join(testDir, "simplecc.tar.gz"),
 			Ctor:                `{"Args":["init","a","100","b","200"]}`,
 			ChannelConfigPolicy: "/Channel/Application/Endorsement",
 			Sequence:            "1",
 			InitRequired:        true,
-			Label:               "my_simple_chaincode",
+			Label:               "my_prebuilt_chaincode",
 		}
 
-		nwo.PackageChaincode(network, chaincode, org1Peer0)
-
-		// we set the PackageID so that we can pass it to the approve step
-		chaincode.SetPackageIDFromPackageFile()
+		nwo.PackageChaincodeBinary(chaincode)
 
 		//
 		// when the ACL policy for _lifecycle/InstallChaincode is not satisfied
@@ -276,7 +272,7 @@ var _ = Describe("EndToEndACL", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit())
-		Expect(sess.Err).To(gbytes.Say(`Error: chaincode install failed with status: 500 - Failed to authorize invocation due to failed ACL check: Failed verifying that proposal's creator satisfies local MSP principal during channelless check policy with policy \[Admins\]: \[This identity is not an admin\]`))
+		Expect(sess.Err).To(gbytes.Say(`Error: chaincode install failed with status: 500 - Failed to authorize invocation due to failed ACL check: Failed verifying that proposal's creator satisfies local MSP principal during channelless check policy with policy \Q[Admins]\E: \Q[The identity is not an admin under this MSP [Org1MSP]: The identity does not contain OU [ADMIN], MSP: [Org1MSP]]\E`))
 
 		//
 		// when the ACL policy for _lifecycle/InstallChaincode is satisfied
@@ -353,6 +349,26 @@ var _ = Describe("EndToEndACL", func() {
 		//
 		By("approving a chaincode definition for org1 and org2")
 		nwo.ApproveChaincodeForMyOrg(network, "testchannel", orderer, chaincode, org1Peer0, org2Peer0)
+
+		//
+		// when the ACL policy for _lifecycle/QueryApprovedChaincodeDefinition is not satisfied
+		//
+		By("querying the approved chaincode definition for org1 as an org2 admin")
+		sess, err = network.PeerAdminSession(org2Peer0, commands.ChaincodeQueryApproved{
+			ChannelID:     "testchannel",
+			Name:          chaincode.Name,
+			Sequence:      chaincode.Sequence,
+			PeerAddresses: []string{network.PeerAddress(org1Peer0, nwo.ListenPort)},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit())
+		Expect(sess.Err).To(gbytes.Say(`\QError: query failed with status: 500 - Failed to authorize invocation due to failed ACL check: Failed deserializing proposal creator during channelless check policy with policy [Admins]: [expected MSP ID Org1MSP, received Org2MSP]\E`))
+
+		//
+		// when the ACL policy for _lifecycle/QueryApprovedChaincodeDefinition is satisfied
+		//
+		By("querying the approved chaincode definition for org1 as an org1 admin")
+		nwo.EnsureChaincodeApproved(network, org1Peer0, "testchannel", chaincode.Name, chaincode.Sequence)
 
 		//
 		// when the ACL policy for CheckCommitReadiness is not satisified

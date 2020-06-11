@@ -10,33 +10,26 @@ import (
 	"fmt"
 	"sync"
 
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	endorsement "github.com/hyperledger/fabric/core/handlers/endorsement/api"
 	endorsement3 "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
 	"github.com/hyperledger/fabric/core/transientstore"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 )
-
-//go:generate mockery -dir . -name Store -case underscore -output mocks/
-
-// Store is local defined interface for mocking foreign interface transientstore.Store.
-type Store interface {
-	transientstore.Store
-}
 
 //go:generate mockery -dir . -name TransientStoreRetriever -case underscore -output mocks/
 
 // TransientStoreRetriever retrieves transient stores
 type TransientStoreRetriever interface {
 	// StoreForChannel returns the transient store for the given channel
-	StoreForChannel(channel string) transientstore.Store
+	StoreForChannel(channel string) *transientstore.Store
 }
 
 //go:generate mockery -dir . -name ChannelStateRetriever -case underscore -output mocks/
 
 // ChannelStateRetriever retrieves Channel state
 type ChannelStateRetriever interface {
-	// ChannelState returns a QueryCreator for the given Channel
+	// NewQueryCreator returns a QueryCreator for the given Channel
 	NewQueryCreator(channel string) (QueryCreator, error)
 }
 

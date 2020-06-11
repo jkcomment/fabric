@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	pmsp "github.com/hyperledger/fabric-protos-go/msp"
+	protospeer "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
@@ -23,13 +26,16 @@ import (
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
-	"github.com/hyperledger/fabric/protos/common"
-	pmsp "github.com/hyperledger/fabric/protos/msp"
-	protospeer "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
+
+//go:generate counterfeiter -o mocks/policy_manager.go -fake-name PolicyManager . policyManager
+
+type policyManager interface {
+	policies.Manager
+}
 
 //go:generate counterfeiter -o mocks/signer_serializer.go --fake-name SignerSerializer . signerSerializer
 
@@ -83,7 +89,7 @@ func TestPKIidOfNil(t *testing.T) {
 	signer := &mocks.SignerSerializer{}
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
-	msgCryptoService := NewMCS(&mocks.ChannelPolicyManagerGetter{}, signer, mgmt.NewDeserializersManager(), cryptoProvider)
+	msgCryptoService := NewMCS(&mocks.ChannelPolicyManagerGetter{}, signer, mgmt.NewDeserializersManager(cryptoProvider), cryptoProvider)
 
 	pkid := msgCryptoService.GetPKIidOfCert(nil)
 	// Check pkid is not nil
@@ -137,10 +143,11 @@ func TestSign(t *testing.T) {
 	signer.SignReturns([]byte("signature"), nil)
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
+
 	msgCryptoService := NewMCS(
 		&mocks.ChannelPolicyManagerGetter{},
 		signer,
-		mgmt.NewDeserializersManager(),
+		mgmt.NewDeserializersManager(cryptoProvider),
 		cryptoProvider,
 	)
 
@@ -265,11 +272,10 @@ func TestVerifyBlock(t *testing.T) {
 	assert.Error(t, msgCryptoService.VerifyBlock([]byte("C"), 42, blockRaw))
 
 	// Check invalid args
-	assert.Error(t, msgCryptoService.VerifyBlock([]byte("C"), 42, []byte{0, 1, 2, 3, 4}))
-	assert.Error(t, msgCryptoService.VerifyBlock([]byte("C"), 42, nil))
+	assert.Error(t, msgCryptoService.VerifyBlock([]byte("C"), 42, &common.Block{}))
 }
 
-func mockBlock(t *testing.T, channel string, seqNum uint64, localSigner *mocks.SignerSerializer, dataHash []byte) ([]byte, []byte) {
+func mockBlock(t *testing.T, channel string, seqNum uint64, localSigner *mocks.SignerSerializer, dataHash []byte) (*common.Block, []byte) {
 	block := protoutil.NewBlock(seqNum, nil)
 
 	// Add a fake transaction to the block referring channel "C"
@@ -309,10 +315,7 @@ func mockBlock(t *testing.T, channel string, seqNum uint64, localSigner *mocks.S
 		},
 	})
 
-	blockRaw, err := proto.Marshal(block)
-	assert.NoError(t, err, "Failed marshalling block")
-
-	return blockRaw, msg
+	return block, msg
 }
 
 func TestExpiration(t *testing.T) {

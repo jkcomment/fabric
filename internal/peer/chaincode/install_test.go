@@ -12,8 +12,9 @@ import (
 	"os"
 	"testing"
 
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/internal/peer/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -41,8 +42,10 @@ func initInstallTest(t *testing.T, fsPath string, ec pb.EndorserClient, mockResp
 		Signer:          signer,
 		EndorserClients: []pb.EndorserClient{ec},
 	}
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 
-	cmd := installCmd(mockCF, nil)
+	cmd := installCmd(mockCF, nil, cryptoProvider)
 	addFlags(cmd)
 
 	return cmd, mockCF
@@ -161,21 +164,4 @@ func TestInstall(t *testing.T) {
 	if err := installCC(t); err != nil {
 		t.Fatalf("Install failed with error: %v", err)
 	}
-}
-
-func newInstallerForTest(t *testing.T, ec pb.EndorserClient) (installer *Installer, cleanup func()) {
-	fsPath, err := ioutil.TempDir("", "installerForTest")
-	assert.NoError(t, err)
-	_, mockCF := initInstallTest(t, fsPath, ec, nil)
-
-	i := &Installer{
-		EndorserClients: mockCF.EndorserClients,
-		Signer:          mockCF.Signer,
-	}
-
-	cleanupFunc := func() {
-		cleanupInstallTest(fsPath)
-	}
-
-	return i, cleanupFunc
 }

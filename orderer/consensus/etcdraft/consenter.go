@@ -14,25 +14,22 @@ import (
 
 	"code.cloudfoundry.org/clock"
 	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric/bccsp/factory"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
+	"github.com/hyperledger/fabric-protos-go/orderer/etcdraft"
+	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/metrics"
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"github.com/hyperledger/fabric/orderer/consensus"
 	"github.com/hyperledger/fabric/orderer/consensus/inactive"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft"
 )
-
-// CreateChainCallback creates a new chain
-type CreateChainCallback func()
 
 //go:generate mockery -dir . -name InactiveChainRegistry -case underscore -output mocks
 
@@ -40,7 +37,7 @@ type CreateChainCallback func()
 type InactiveChainRegistry interface {
 	// TrackChain tracks a chain with the given name, and calls the given callback
 	// when this chain should be created.
-	TrackChain(chainName string, genesisBlock *common.Block, createChain CreateChainCallback)
+	TrackChain(chainName string, genesisBlock *common.Block, createChain func())
 }
 
 //go:generate mockery -dir . -name ChainGetter -case underscore -output mocks
@@ -73,6 +70,7 @@ type Consenter struct {
 	OrdererConfig  localconfig.TopLevel
 	Cert           []byte
 	Metrics        *Metrics
+	BCCSP          bccsp.BCCSP
 }
 
 // TargetChannel extracts the channel from the given proto.Message.
@@ -219,8 +217,12 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		opts,
 		c.Communication,
 		rpc,
+		c.BCCSP,
 		func() (BlockPuller, error) {
-			return newBlockPuller(support, c.Dialer, c.OrdererConfig.General.Cluster, factory.GetDefault())
+			return NewBlockPuller(support, c.Dialer, c.OrdererConfig.General.Cluster, c.BCCSP)
+		},
+		func() {
+			c.InactiveChainRegistry.TrackChain(support.ChannelID(), nil, func() { c.CreateChain(support.ChannelID()) })
 		},
 		nil,
 	)
@@ -259,6 +261,7 @@ func New(
 	r *multichannel.Registrar,
 	icr InactiveChainRegistry,
 	metricsProvider metrics.Provider,
+	bccsp bccsp.BCCSP,
 ) *Consenter {
 	logger := flogging.MustGetLogger("orderer.consensus.etcdraft")
 
@@ -278,6 +281,7 @@ func New(
 		Dialer:                clusterDialer,
 		Metrics:               NewMetrics(metricsProvider),
 		InactiveChainRegistry: icr,
+		BCCSP:                 bccsp,
 	}
 	consenter.Dispatcher = &Dispatcher{
 		Logger:        logger,

@@ -11,14 +11,15 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/chaincode"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
-	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 )
@@ -110,33 +111,22 @@ func TestInstalledCCs(t *testing.T) {
 	}
 }
 
-func TestChaincodeData(t *testing.T) {
-	var cd ccprovider.ChaincodeDefinition
-	cd = &ccprovider.ChaincodeData{
-		Data:                []byte("Data"),
-		Escc:                "Escc",
-		Id:                  []byte("Id"),
-		InstantiationPolicy: []byte("InstantiationPolicy"),
-		Name:                "Name",
-		Policy:              []byte("Policy"),
-		Version:             "Version",
-		Vscc:                "Vscc",
-	}
+func TestSetGetChaincodeInstallPath(t *testing.T) {
+	tempDir, err := ioutil.TempDir("", "ccprovider")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tempDir)
 
-	assert.Equal(t, cd.CCVersion(), "Version")
-	assert.Equal(t, cd.Endorsement(), "Escc")
-	assert.Equal(t, cd.RequiresInit(), false)
-}
-
-func TestGetChaincodeInstallPath(t *testing.T) {
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
 	c := &ccprovider.CCInfoFSImpl{GetHasher: cryptoProvider}
 	installPath := c.GetChaincodeInstallPath()
 	defer ccprovider.SetChaincodesPath(installPath)
 
-	ccprovider.SetChaincodesPath("blahblah")
-	assert.Equal(t, "blahblah", c.GetChaincodeInstallPath())
+	path := filepath.Join(tempDir, "blahblah")
+	ccprovider.SetChaincodesPath(path)
+	assert.DirExistsf(t, path, "expect %s to be created")
+
+	assert.Equal(t, path, c.GetChaincodeInstallPath())
 }
 
 func setupDirectoryStructure(t *testing.T) (string, map[string][]byte) {

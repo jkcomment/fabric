@@ -1,17 +1,14 @@
 Building Your First Network
 ===========================
 
-.. note:: These instructions have been verified to work against the
-          latest stable Docker images and the pre-compiled
-          setup utilities within the supplied tar file. If you run
-          these commands with images or tools from the current master
-          branch, it is possible that you will see configuration and panic
-          errors.
+.. note:: The Build your first network (BYFN) tutorial has been deprecated. If
+          you are getting started with Hyperledger Fabric and would like to deploy
+          a basic network, see :doc:`test_network`. If you are deploying Fabric
+          in production, see the guide for :doc:`deployment_guide_overview`.
 
 The build your first network (BYFN) scenario provisions a sample Hyperledger
 Fabric network consisting of two organizations, each maintaining two peer
-nodes. It also will deploy a "Solo" ordering service by default, though other
-ordering service implementations are available.
+nodes. It also will deploy a Raft ordering service by default.
 
 Install prerequisites
 ---------------------
@@ -38,8 +35,8 @@ Want to run it now?
 
 We provide a fully annotated script --- ``byfn.sh`` --- that leverages these Docker
 images to quickly bootstrap a Hyperledger Fabric network that by default is
-comprised of four peers representing two different organizations, and an orderer
-node. It will also launch a container to run a scripted execution that will join
+comprised of four peers representing two different organizations, and a Raft ordering
+service. It will also launch a container to run a scripted execution that will join
 peers to a channel, deploy a chaincode and drive execution of transactions
 against the deployed chaincode.
 
@@ -60,8 +57,9 @@ Here's the help text for the ``byfn.sh`` script:
     -d <delay> - delay duration in seconds (defaults to 3)"
     -f <docker-compose-file> - specify which docker-compose file use (defaults to docker-compose-cli.yaml)"
     -s <dbtype> - the database backend to use: goleveldb (default) or couchdb"
-    -l <language> - the chaincode language: golang (default), node, or java"
-    -o <consensus-type> - the consensus-type of the ordering service: solo (default), kafka, or etcdraft"
+    -l <language> - the chaincode language: golang (default), javascript, or java"
+    -a - launch certificate authorities (no certificate authorities are launched by default)
+    -n - do not deploy chaincode (abstore chaincode is deployed by default)
     -i <imagetag> - the tag to be used to launch the network (defaults to \"latest\")"
     -v - verbose mode"
   byfn.sh -h (print this message)"
@@ -72,7 +70,7 @@ Here's the help text for the ``byfn.sh`` script:
     byfn.sh generate -c mychannel"
     byfn.sh up -c mychannel -s couchdb"
     byfn.sh up -c mychannel -s couchdb -i 1.4.0"
-    byfn.sh up -l node"
+    byfn.sh up -l javascript"
     byfn.sh down -c mychannel"
     byfn.sh upgrade -c mychannel"
 
@@ -154,24 +152,24 @@ Next, you can bring the network up with one of the following commands:
 
   ./byfn.sh up
 
-The above command will compile Golang chaincode images and spin up the corresponding
+The above command will compile Go chaincode images and spin up the corresponding
 containers. Go is the default chaincode language, however there is also support
-for `Node.js <https://fabric-shim.github.io/>`_ and `Java <https://fabric-chaincode-java.github.io/>`_
+for `Node.js <https://hyperledger.github.io/fabric-chaincode-node/>`_ and `Java <https://hyperledger.github.io/fabric-chaincode-java/>`_
 chaincode. If you'd like to run through this tutorial with node chaincode, pass
 the following command instead:
 
 .. code:: bash
 
   # we use the -l flag to specify the chaincode language
-  # forgoing the -l flag will default to Golang
+  # forgoing the -l flag will default to "golang"
 
-  ./byfn.sh up -l node
+  ./byfn.sh up -l javascript
 
 .. note:: For more information on the Node.js shim, please refer to its
-          `documentation <https://fabric-shim.github.io/ChaincodeInterface.html>`_.
+          `documentation <https://hyperledger.github.io/fabric-chaincode-node/master/api/fabric-shim.ChaincodeInterface.html>`_.
 
 .. note:: For more information on the Java shim, please refer to its
-          `documentation <https://fabric-chaincode-java.github.io/org/hyperledger/fabric/shim/Chaincode.html>`_.
+          `documentation <https://hyperledger.github.io/fabric-chaincode-java/{BRANCH}/api/org/hyperledger/fabric/shim/Chaincode.html>`_.
 
 Тo make the sample run with Java chaincode, you have to specify ``-l java`` as follows:
 
@@ -182,24 +180,7 @@ the following command instead:
 .. note:: Do not run both of these commands. Only one language can be tried unless
           you bring down and recreate the network between.
 
-In addition to support for multiple chaincode languages, you can also issue a
-flag that will bring up a five node Raft ordering service or a Kafka ordering
-service instead of the one node Solo orderer. For more information about the
-currently supported ordering service implementations, check out :doc:`orderer/ordering_service`.
-
-To bring up the network with a Raft ordering service, issue:
-
-.. code:: bash
-
-  ./byfn.sh up -o etcdraft
-
-To bring up the network with a Kafka ordering service, issue:
-
-.. code:: bash
-
-  ./byfn.sh up -o kafka
-
-Once again, you will be prompted as to whether you wish to continue or abort.
+You will be prompted as to whether you wish to continue or abort.
 Respond with a ``y`` or hit the return key:
 
 .. code:: bash
@@ -328,9 +309,8 @@ right now. If you're interested, you can peruse these topics on your own time.
 After we run the ``cryptogen`` tool, the generated certificates and keys will be
 saved to a folder titled ``crypto-config``. Note that the ``crypto-config.yaml``
 file lists five orderers as being tied to the orderer organization. While the
-``cryptogen`` tool will create certificates for all five of these orderers, unless
-the Raft or Kafka ordering services are being used, only one of these orderers
-will be used in a Solo ordering service implementation and be used to create the
+``cryptogen`` tool will create certificates for all five of these orderers. These orderers
+will be used in a etcdraft ordering service implementation and be used to create the
 system channel and ``mychannel``.
 
 Configuration Transaction Generator
@@ -360,14 +340,8 @@ two Peer Orgs.  Pay specific attention to the "Profiles" section at the bottom o
 this file. You will notice that we have several unique profiles. A few are worth
 noting:
 
-* ``TwoOrgsOrdererGenesis``: generates the genesis block for a Solo ordering
-  service.
-
 * ``SampleMultiNodeEtcdRaft``: generates the genesis block for a Raft ordering
   service. Only used if you issue the ``-o`` flag and specify ``etcdraft``.
-
-* ``SampleDevModeKafka``: generates the genesis block for a Kafka ordering
-  service. Only used if you issue the ``-o`` flag and specify ``kafka``.
 
 * ``TwoOrgsChannel``: generates the genesis block for our channel, ``mychannel``.
 
@@ -433,34 +407,12 @@ Then, we'll invoke the ``configtxgen`` tool to create the orderer genesis block:
 
 .. code:: bash
 
-    ../bin/configtxgen -profile TwoOrgsOrdererGenesis -channelID byfn-sys-channel -outputBlock ./channel-artifacts/genesis.block
-
-To output a genesis block for a Raft ordering service, this command should be:
-
-.. code:: bash
-
   ../bin/configtxgen -profile SampleMultiNodeEtcdRaft -channelID byfn-sys-channel -outputBlock ./channel-artifacts/genesis.block
 
-Note the ``SampleMultiNodeEtcdRaft`` profile being used here.
-
-To output a genesis block for a Kafka ordering service, issue:
-
-.. code:: bash
-
-  ../bin/configtxgen -profile SampleDevModeKafka -channelID byfn-sys-channel -outputBlock ./channel-artifacts/genesis.block
-
-If you are not using Raft or Kafka, you should see an output similar to the
-following:
-
-.. code:: bash
-
-  2017-10-26 19:21:56.301 EDT [common/tools/configtxgen] main -> INFO 001 Loading configuration
-  2017-10-26 19:21:56.309 EDT [common/tools/configtxgen] doOutputBlock -> INFO 002 Generating genesis block
-  2017-10-26 19:21:56.309 EDT [common/tools/configtxgen] doOutputBlock -> INFO 003 Writing genesis block
-
 .. note:: The orderer genesis block and the subsequent artifacts we are about to create
-          will be output into the ``channel-artifacts`` directory at the root of this
-          project. The `channelID` in the above command is the name of the system channel.
+          will be output into the ``channel-artifacts`` directory at the root of the
+          ``first-network`` directory. The `channelID` in the above command is the
+          name of the system channel.
 
 .. _createchanneltx:
 
@@ -476,13 +428,10 @@ set ``CHANNEL_NAME`` as an environment variable that can be used throughout thes
 
     export CHANNEL_NAME=mychannel  && ../bin/configtxgen -profile TwoOrgsChannel -outputCreateChannelTx ./channel-artifacts/channel.tx -channelID $CHANNEL_NAME
 
-Note that you don't have to issue a special command for the channel if you are
-using a Raft or Kafka ordering service. The ``TwoOrgsChannel`` profile will use
-the ordering service configuration you specified when creating the genesis block
-for the network.
+Note that the ``TwoOrgsChannel`` profile will use the ordering service
+configuration you specified when creating the genesis block for the network.
 
-If you are not using a Raft or Kafka ordering service, you should see an output
-similar to the following in your terminal:
+You should see an output similar to the following in your terminal:
 
 .. code:: bash
 
@@ -523,7 +472,7 @@ First let's start our network:
 
 .. code:: bash
 
-    docker-compose -f docker-compose-cli.yaml up -d
+    docker-compose -f docker-compose-cli.yaml -f docker-compose-etcdraft2.yaml up -d
 
 If you want to see the realtime logs for your network, then do not supply the ``-d`` flag.
 If you let the logs stream, then you will need to open a second terminal to execute the CLI calls.
@@ -550,7 +499,7 @@ If successful you should see the following:
 
 .. code:: bash
 
-        root@0d78bb69300d:/opt/gopath/src/github.com/hyperledger/fabric/peer#
+        bash-5.0#
 
 For the following CLI commands against ``peer0.org1.example.com`` to work, we need
 to preface our commands with the four environment variables given below.  These
@@ -666,9 +615,9 @@ Install and define a chaincode
           your own chaincode, see the :doc:`chaincode4ade` tutorial.
 
 .. note:: These instructions use the Fabric chaincode lifecycle introduced in
-          the v2.0 Alpha release. If you would like to use the previous
-          lifecycle to install and instantiate a chaincode, visit the v1.4
-          version of the `Building your first network tutorial <https://hyperledger-fabric.readthedocs.io/en/release-1.4/build_network.html>`__.
+          the v2.0 release. If you would like to use the previous lifecycle to
+          install and instantiate a chaincode, visit the v1.4 version of the
+          `Building your first network tutorial <https://hyperledger-fabric.readthedocs.io/en/release-1.4/build_network.html>`__.
 
 Applications interact with the blockchain ledger through ``chaincode``.
 Therefore we need to install a chaincode on every peer that will execute and
@@ -681,13 +630,18 @@ each package you create, you need to provide a chaincode package label as a
 description of the chaincode. Use the following commands to package a sample
 Go, Node.js or Java chaincode.
 
-**Golang**
+**Go**
 
 .. code:: bash
 
-    # this packages a Golang chaincode.
+    # before packaging Go chaincode, vendoring Go dependencies is required like the following commands.
+    cd /opt/gopath/src/github.com/hyperledger/fabric-samples/chaincode/abstore/go
+    GO111MODULE=on go mod vendor
+    cd -
+
+    # this packages a Go chaincode.
     # make note of the --lang flag to indicate "golang" chaincode
-    # for go chaincode --path takes the relative path from $GOPATH/src
+    # for Go chaincode --path takes the relative path from $GOPATH/src
     # The --label flag is used to create the package label
     peer lifecycle chaincode package mycc.tar.gz --path github.com/hyperledger/fabric-samples/chaincode/abstore/go/ --lang golang --label mycc_1
 
@@ -697,9 +651,9 @@ Go, Node.js or Java chaincode.
 
     # this packages a Node.js chaincode
     # make note of the --lang flag to indicate "node" chaincode
-    # for node chaincode --path takes the absolute path to the node.js chaincode
+    # for node chaincode --path takes the absolute path to the Node.js chaincode
     # The --label flag is used to create the package label
-    peer lifecycle chaincode package mycc.tar.gz --path /opt/gopath/src/github.com/hyperledger/fabric-samples/chaincode/abstore/node/ --lang node --label mycc_1
+    peer lifecycle chaincode package mycc.tar.gz --path /opt/gopath/src/github.com/hyperledger/fabric-samples/chaincode/abstore/javascript/ --lang node --label mycc_1
 
 **Java**
 
@@ -707,7 +661,7 @@ Go, Node.js or Java chaincode.
 
     # this packages a java chaincode
     # make note of the --lang flag to indicate "java" chaincode
-    # for java chaincode --path takes the absolute path to the java chaincode
+    # for java chaincode --path takes the absolute path to the Java chaincode
     # The --label flag is used to create the package label
     peer lifecycle chaincode package mycc.tar.gz --path /opt/gopath/src/github.com/hyperledger/fabric-samples/chaincode/abstore/java/ --lang java --label mycc_1
 
@@ -798,7 +752,7 @@ the command does not need to target every peer within an organization.
     # this approves a chaincode definition for your org
     # make note of the --package-id flag that provides the package ID
     # use the --init-required flag to request the ``Init`` function be invoked to initialize the chaincode
-    peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --package-id $CC_PACKAGE_ID --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+    peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
 
 We could have provided a ``--signature-policy`` or ``--channel-config-policy``
 argument to the command above to set the chaincode endorsement policy. The
@@ -834,7 +788,7 @@ have multiple peers.
     # this defines a chaincode for your org
     # make note of the --package-id flag that provides the package ID
     # use the --init-required flag to request the Init function be invoked to initialize the chaincode
-    peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --package-id $CC_PACKAGE_ID --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+    peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
 
 Once a sufficient number of channel members have approved a chaincode definition,
 one member can commit the definition to the channel. By default a majority of
@@ -847,7 +801,7 @@ view the current approvals by organization by issuing the following query:
     # the flags used for this command are identical to those used for approveformyorg
     # except for --package-id which is not required since it is not stored as part of
     # the definition
-    peer lifecycle chaincode checkcommitreadiness --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --output json
+    peer lifecycle chaincode checkcommitreadiness --channelID $CHANNEL_NAME --name mycc --version 1.0 --init-required --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --output json
 
 The command will produce as output a JSON map showing if the organizations in the
 channel have approved the chaincode definition provided in the checkcommitreadiness
@@ -870,7 +824,7 @@ collect endorsements.
 .. code:: bash
 
     # this commits the chaincode definition to the channel
-    peer lifecycle chaincode commit -o orderer.example.com:7050 --channelID $CHANNEL_NAME --name mycc --version 1.0 --sequence 1 --init-required --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+    peer lifecycle chaincode commit -o orderer.example.com:7050 --channelID $CHANNEL_NAME --name mycc --version 1.0 --sequence 1 --init-required --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
 
 Invoking the chaincode
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -887,7 +841,7 @@ ledger.
 
     # be sure to set the -C and -n flags appropriately
     # use the --isInit flag if you are invoking an Init function
-    peer chaincode invoke -o orderer.example.com:7050 --isInit --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C $CHANNEL_NAME -n mycc --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt -c '{"Args":["Init","a","100","b","100"]}' --waitForEvent
+    peer chaincode invoke -o orderer.example.com:7050 --isInit --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C $CHANNEL_NAME -n mycc --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt -c '{"Args":["Init","a","100","b","100"]}' --waitForEvent
 
 The first invoke will start the chaincode container. We may need to wait for the
 container to start. Node.js images will take longer.
@@ -913,7 +867,7 @@ and update the state DB. The syntax for invoke is as follows:
 .. code:: bash
 
   # be sure to set the -C and -n flags appropriately
-  peer chaincode invoke -o orderer.example.com:7050 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C $CHANNEL_NAME -n mycc --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt -c '{"Args":["invoke","a","b","10"]}' --waitForEvent
+  peer chaincode invoke -o orderer.example.com:7050 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem -C $CHANNEL_NAME -n mycc --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt -c '{"Args":["invoke","a","b","10"]}' --waitForEvent
 
 Query
 ^^^^^
@@ -1210,7 +1164,7 @@ the network pass ``docker-compose-couch.yaml`` as well:
 
 .. code:: bash
 
-    docker-compose -f docker-compose-cli.yaml -f docker-compose-couch.yaml up -d
+    docker-compose -f docker-compose-cli.yaml -f docker-compose-couch.yaml -f docker-compose-etcdraft2.yaml up -d
 
 **abstore** should now work using CouchDB underneath.
 
@@ -1225,7 +1179,7 @@ the network pass ``docker-compose-couch.yaml`` as well:
 You can use **abstore** chaincode against the CouchDB state database
 using the steps outlined above, however in order to exercise the CouchDB query
 capabilities you will need to use a chaincode that has data modeled as JSON.
-The sample chaincode **marbles02** has been written to demostrate the queries
+The sample chaincode **marbles02** has been written to demonstrate the queries
 you can issue from your chaincode if you are using a CouchDB database. You can
 locate the **marbles02** chaincode in the ``fabric/examples/chaincode/go``
 directory.
@@ -1239,11 +1193,17 @@ channel, use the following steps to interact with the **marbles02** chaincode:
 
 .. code:: bash
 
-      peer lifecycle chaincode package marbles.tar.gz --path github.com/hyperledger/fabric-samples/chaincode/marbles02/go/ --lang golang --label marbles_1
-      peer lifecycle chaincode install marbles.tar.gz
+       # before packaging Go chaincode, vendoring dependencies is required.
+       cd /opt/gopath/src/github.com/hyperledger/fabric-samples/chaincode/marbles02/go
+       GO111MODULE=on go mod vendor
+       cd -
 
- The install command will return a chaincode packageID that you will use to
- approve a chaincode definition.
+       # package and install the Go chaincode
+       peer lifecycle chaincode package marbles.tar.gz --path github.com/hyperledger/fabric-samples/chaincode/marbles02/go/ --lang golang --label marbles_1
+       peer lifecycle chaincode install marbles.tar.gz
+
+The install command will return a chaincode packageID that you will use to
+approve a chaincode definition.
 
 .. code:: bash
 
@@ -1263,7 +1223,7 @@ channel, use the following steps to interact with the **marbles02** chaincode:
 
        # be sure to modify the $CHANNEL_NAME variable accordingly for the command
 
-       peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name marbles --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+       peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name marbles --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
 
 - Install the chaincode on ``peer0.org2.example.com``:
 
@@ -1282,8 +1242,8 @@ channel, use the following steps to interact with the **marbles02** chaincode:
 
        # be sure to modify the $CHANNEL_NAME variable accordingly for the command
 
-       peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name marbles --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
-       peer lifecycle chaincode commit -o orderer.example.com:7050 --channelID $CHANNEL_NAME --name marbles --version 1.0 --sequence 1 --tls true --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+       peer lifecycle chaincode approveformyorg --channelID $CHANNEL_NAME --name marbles --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+       peer lifecycle chaincode commit -o orderer.example.com:7050 --channelID $CHANNEL_NAME --name marbles --version 1.0 --sequence 1 --tls --cafile /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem --peerAddresses peer0.org1.example.com:7051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt --peerAddresses peer0.org2.example.com:9051 --tlsRootCertFiles /opt/gopath/src/github.com/hyperledger/fabric/peer/crypto/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
 
 - We can now create some marbles. The first invoke of the chaincode will start
   the chaincode container. You may need to wait for the container to start.
@@ -1363,15 +1323,6 @@ since its data content is stored in JSON format and fully queryable. Therefore, 
 
 CouchDB can also enhance the security for compliance and data protection in the blockchain. As it is able to implement field-level security through the filtering and masking of individual attributes within a transaction, and only authorizing the read-only permission if needed.
 
-In addition, CouchDB falls into the AP-type (Availability and Partition Tolerance) of the CAP theorem. It uses a master-master replication model with ``Eventual Consistency``.
-More information can be found on the
-`Eventual Consistency page of the CouchDB documentation <http://docs.couchdb.org/en/latest/intro/consistency.html>`__.
-However, under each fabric peer, there is no database replicas, writes to database are guaranteed consistent and durable (not ``Eventual Consistency``).
-
-CouchDB is the first external pluggable state database for Fabric, and there could and should be other external database options. For example, IBM enables the relational database for its blockchain.
-And the CP-type (Consistency and Partition Tolerance) databases may also in need, so as to enable data consistency without application level guarantee.
-
-
 A Note on Data Persistence
 --------------------------
 
@@ -1437,7 +1388,7 @@ Troubleshooting
 
    .. code:: bash
 
-       docker rmi -f $(docker images | grep peer[0-9]-peer[0-9] | awk '{print $3}')
+       docker rmi -f $(docker images | grep dev-peer[0-9] | awk '{print $3}')
 
 -  If you see something similar to the following:
 

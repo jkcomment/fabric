@@ -13,15 +13,16 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-chaincode-go/shim"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric-protos-go/transientstore"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/util"
-	"github.com/hyperledger/fabric/core/chaincode/shim"
+	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/msp"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/transientstore"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -63,8 +64,8 @@ type Support interface {
 	// ExecuteLegacyInit - executes a deployment proposal, return original response of chaincode
 	ExecuteLegacyInit(txParams *ccprovider.TransactionParams, name, version string, spec *pb.ChaincodeInput) (*pb.Response, *pb.ChaincodeEvent, error)
 
-	// GetChaincodeDefinition returns ccprovider.ChaincodeDefinition for the chaincode with the supplied name
-	GetChaincodeDefinition(channelID, chaincodeID string, txsim ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error)
+	// ChaincodeEndorsementInfo returns the information from lifecycle required to endorse the chaincode.
+	ChaincodeEndorsementInfo(channelID, chaincodeID string, txsim ledger.QueryExecutor) (*lifecycle.ChaincodeEndorsementInfo, error)
 
 	// CheckACL checks the ACL for the resource for the channel using the
 	// SignedProposal from which an id can be extracted for testing against a policy
@@ -103,15 +104,21 @@ type Endorser struct {
 
 // call specified chaincode (system or user)
 func (e *Endorser) callChaincode(txParams *ccprovider.TransactionParams, input *pb.ChaincodeInput, chaincodeName string) (*pb.Response, *pb.ChaincodeEvent, error) {
-	endorserLogger.Infof("[%s][%s] Entry chaincode: %s", txParams.ChannelID, shorttxid(txParams.TxID), chaincodeName)
 	defer func(start time.Time) {
 		logger := endorserLogger.WithOptions(zap.AddCallerSkip(1))
-		elapsedMilliseconds := time.Since(start).Round(time.Millisecond) / time.Millisecond
-		logger.Infof("[%s][%s] Exit chaincode: %s (%dms)", txParams.ChannelID, shorttxid(txParams.TxID), chaincodeName, elapsedMilliseconds)
+		logger = decorateLogger(logger, txParams)
+		elapsedMillisec := time.Since(start).Milliseconds()
+		logger.Infof("finished chaincode: %s duration: %dms", chaincodeName, elapsedMillisec)
 	}(time.Now())
+
+	meterLabels := []string{
+		"channel", txParams.ChannelID,
+		"chaincode", chaincodeName,
+	}
 
 	res, ccevent, err := e.Support.Execute(txParams, chaincodeName, input)
 	if err != nil {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 		return nil, nil, err
 	}
 
@@ -124,7 +131,7 @@ func (e *Endorser) callChaincode(txParams *ccprovider.TransactionParams, input *
 
 	// Unless this is the weirdo LSCC case, just return
 	if chaincodeName != "lscc" || len(input.Args) < 3 || (string(input.Args[0]) != "deploy" && string(input.Args[0]) != "upgrade") {
-		return res, ccevent, err
+		return res, ccevent, nil
 	}
 
 	// ----- BEGIN -  SECTION THAT MAY NEED TO BE DONE IN LSCC ------
@@ -137,18 +144,25 @@ func (e *Endorser) callChaincode(txParams *ccprovider.TransactionParams, input *
 	// table changes in lscc will be thrown away
 	cds, err := protoutil.UnmarshalChaincodeDeploymentSpec(input.Args[2])
 	if err != nil {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 		return nil, nil, err
 	}
 
 	// this should not be a system chaincode
 	if e.Support.IsSysCC(cds.ChaincodeSpec.ChaincodeId.Name) {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 		return nil, nil, errors.Errorf("attempting to deploy a system chaincode %s/%s", cds.ChaincodeSpec.ChaincodeId.Name, txParams.ChannelID)
+	}
+
+	if len(cds.CodePackage) != 0 {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
+		return nil, nil, errors.Errorf("lscc upgrade/deploy should not include a code packages")
 	}
 
 	_, _, err = e.Support.ExecuteLegacyInit(txParams, cds.ChaincodeSpec.ChaincodeId.Name, cds.ChaincodeSpec.ChaincodeId.Version, cds.ChaincodeSpec.Input)
 	if err != nil {
 		// increment the failure to indicate instantion/upgrade failures
-		meterLabels := []string{
+		meterLabels = []string{
 			"channel", txParams.ChannelID,
 			"chaincode", cds.ChaincodeSpec.ChaincodeId.Name,
 		}
@@ -162,13 +176,17 @@ func (e *Endorser) callChaincode(txParams *ccprovider.TransactionParams, input *
 
 // SimulateProposal simulates the proposal by calling the chaincode
 func (e *Endorser) SimulateProposal(txParams *ccprovider.TransactionParams, chaincodeName string, chaincodeInput *pb.ChaincodeInput) (*pb.Response, []byte, *pb.ChaincodeEvent, error) {
-	endorserLogger.Debugf("[%s][%s] Entry chaincode: %s", txParams.ChannelID, shorttxid(txParams.TxID), chaincodeName)
-	defer endorserLogger.Debugf("[%s][%s] Exit", txParams.ChannelID, shorttxid(txParams.TxID))
+	logger := decorateLogger(endorserLogger, txParams)
+
+	meterLabels := []string{
+		"channel", txParams.ChannelID,
+		"chaincode", chaincodeName,
+	}
 
 	// ---3. execute the proposal and get simulation results
 	res, ccevent, err := e.callChaincode(txParams, chaincodeInput, chaincodeName)
 	if err != nil {
-		endorserLogger.Errorf("[%s][%s] failed to invoke chaincode %s, error: %+v", txParams.ChannelID, shorttxid(txParams.TxID), chaincodeName, err)
+		logger.Errorf("failed to invoke chaincode %s, error: %+v", chaincodeName, err)
 		return nil, nil, nil, err
 	}
 
@@ -183,12 +201,14 @@ func (e *Endorser) SimulateProposal(txParams *ccprovider.TransactionParams, chai
 
 	simResult, err := txParams.TXSimulator.GetTxSimulationResults()
 	if err != nil {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 		return nil, nil, nil, err
 	}
 
 	if simResult.PvtSimulationResults != nil {
 		if chaincodeName == "lscc" {
 			// TODO: remove once we can store collection configuration outside of LSCC
+			e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 			return nil, nil, nil, errors.New("Private data is forbidden to be used in instantiate")
 		}
 		pvtDataWithConfig, err := AssemblePvtRWSet(txParams.ChannelID, simResult.PvtSimulationResults, txParams.TXSimulator, e.Support.GetDeployedCCInfoProvider())
@@ -197,10 +217,12 @@ func (e *Endorser) SimulateProposal(txParams *ccprovider.TransactionParams, chai
 		txParams.TXSimulator.Done()
 
 		if err != nil {
+			e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 			return nil, nil, nil, errors.WithMessage(err, "failed to obtain collections config")
 		}
 		endorsedAt, err := e.Support.GetLedgerHeight(txParams.ChannelID)
 		if err != nil {
+			e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 			return nil, nil, nil, errors.WithMessage(err, fmt.Sprintf("failed to obtain ledger height for channel '%s'", txParams.ChannelID))
 		}
 		// Add ledger height at which transaction was endorsed,
@@ -210,12 +232,14 @@ func (e *Endorser) SimulateProposal(txParams *ccprovider.TransactionParams, chai
 		// Ideally, ledger should add support in the simulator as a first class function `GetHeight()`.
 		pvtDataWithConfig.EndorsedAt = endorsedAt
 		if err := e.PrivateDataDistributor.DistributePrivateData(txParams.ChannelID, txParams.TxID, pvtDataWithConfig, endorsedAt); err != nil {
+			e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 			return nil, nil, nil, err
 		}
 	}
 
 	pubSimResBytes, err := simResult.GetPubSimulationBytes()
 	if err != nil {
+		e.Metrics.SimulationFailure.With(meterLabels...).Add(1)
 		return nil, nil, nil, err
 	}
 
@@ -231,8 +255,6 @@ func (e *Endorser) preProcess(up *UnpackedProposal, channel *Channel) error {
 		e.Metrics.ProposalValidationFailed.Add(1)
 		return errors.WithMessage(err, "error validating proposal")
 	}
-
-	endorserLogger.Debugf("[%s][%s] processing txid: %s", up.ChannelHeader.ChannelId, shorttxid(up.ChannelHeader.TxId), up.ChannelHeader.TxId)
 
 	if up.ChannelHeader.ChannelId == "" {
 		// chainless proposals do not/cannot affect ledger and cannot be submitted as transactions
@@ -277,8 +299,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	e.Metrics.ProposalsReceived.Add(1)
 
 	addr := util.ExtractRemoteAddress(ctx)
-	endorserLogger.Debug("Entering: request from", addr)
-	defer endorserLogger.Debug("Exit: request from", addr)
+	endorserLogger.Debug("request from", addr)
 
 	// variables to capture proposal duration metric
 	success := false
@@ -322,7 +343,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 	}
 
 	if pResp.Endorsement != nil || up.ChannelHeader.ChannelId == "" {
-		// We mark the tx as successfull only if it was successfully endorsed, or
+		// We mark the tx as successful only if it was successfully endorsed, or
 		// if it was a system chaincode on a channel-less channel and therefore
 		// cannot be endorsed.
 		success = true
@@ -340,6 +361,8 @@ func (e *Endorser) ProcessProposalSuccessfullyOrError(up *UnpackedProposal) (*pb
 		SignedProp: up.SignedProposal,
 		Proposal:   up.Proposal,
 	}
+
+	logger := decorateLogger(endorserLogger, txParams)
 
 	if acquireTxSimulator(up.ChannelHeader.ChannelId, up.ChaincodeName) {
 		txSim, err := e.Support.GetTxSimulator(up.ChannelID(), up.TxID())
@@ -365,7 +388,7 @@ func (e *Endorser) ProcessProposalSuccessfullyOrError(up *UnpackedProposal) (*pb
 		txParams.HistoryQueryExecutor = hqe
 	}
 
-	cdLedger, err := e.Support.GetChaincodeDefinition(up.ChannelHeader.ChannelId, up.ChaincodeName, txParams.TXSimulator)
+	cdLedger, err := e.Support.ChaincodeEndorsementInfo(up.ChannelID(), up.ChaincodeName, txParams.TXSimulator)
 	if err != nil {
 		return nil, errors.WithMessagef(err, "make sure the chaincode %s has been successfully defined on channel %s and try again", up.ChaincodeName, up.ChannelID())
 	}
@@ -383,10 +406,10 @@ func (e *Endorser) ProcessProposalSuccessfullyOrError(up *UnpackedProposal) (*pb
 
 	prpBytes, err := protoutil.GetBytesProposalResponsePayload(up.ProposalHash, res, simulationResult, cceventBytes, &pb.ChaincodeID{
 		Name:    up.ChaincodeName,
-		Version: cdLedger.CCVersion(),
+		Version: cdLedger.Version,
 	})
 	if err != nil {
-		endorserLogger.Warning("Failed marshaling the proposal response payload to bytes", err)
+		logger.Warning("Failed marshaling the proposal response payload to bytes", err)
 		return nil, errors.WithMessage(err, "failed to create the proposal response")
 	}
 
@@ -412,15 +435,15 @@ func (e *Endorser) ProcessProposalSuccessfullyOrError(up *UnpackedProposal) (*pb
 	case res.Status >= shim.ERRORTHRESHOLD:
 		meterLabels = append(meterLabels, "chaincodeerror", strconv.FormatBool(true))
 		e.Metrics.EndorsementsFailed.With(meterLabels...).Add(1)
-		endorserLogger.Debugf("[%s][%s] endorseProposal() resulted in chaincode %s error for txid: %s", up.ChannelID(), shorttxid(up.TxID()), up.ChaincodeName, up.TxID())
+		logger.Debugf("chaincode error %d", res.Status)
 		return &pb.ProposalResponse{
 			Response: res,
 		}, nil
 	}
 
-	escc := cdLedger.Endorsement()
+	escc := cdLedger.EndorsementPlugin
 
-	endorserLogger.Debugf("[%s][%s] escc for chaincode %s is %s", up.ChannelID(), shorttxid(up.TxID()), up.ChaincodeName, escc)
+	logger.Debugf("escc for chaincode %s is %s", up.ChaincodeName, escc)
 
 	// Note, mPrpBytes is the same as prpBytes by default endorsement plugin, but others could change it.
 	endorsement, mPrpBytes, err := e.Support.EndorseWithPlugin(escc, up.ChannelID(), prpBytes, up.SignedProposal)
@@ -472,4 +495,8 @@ func CreateCCEventBytes(ccevent *pb.ChaincodeEvent) ([]byte, error) {
 	}
 
 	return proto.Marshal(ccevent)
+}
+
+func decorateLogger(logger *flogging.FabricLogger, txParams *ccprovider.TransactionParams) *flogging.FabricLogger {
+	return logger.With("channel", txParams.ChannelID, "txID", shorttxid(txParams.TxID))
 }

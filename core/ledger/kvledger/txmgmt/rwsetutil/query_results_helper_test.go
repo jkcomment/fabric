@@ -1,34 +1,35 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package rwsetutil
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	bccspfactory "github.com/hyperledger/fabric/bccsp/factory"
-	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/version"
-	"github.com/hyperledger/fabric/protos/ledger/rwset/kvrwset"
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
+	"github.com/hyperledger/fabric/core/ledger/internal/version"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var (
+	testHashFunc = func(data []byte) ([]byte, error) {
+		h := sha256.New()
+		if _, err := h.Write(data); err != nil {
+			return nil, err
+		}
+		return h.Sum(nil), nil
+	}
 )
 
 func TestQueryResultHelper_NoResults(t *testing.T) {
-	helper, _ := NewRangeQueryResultsHelper(true, 3)
+	helper, _ := NewRangeQueryResultsHelper(true, 3, testHashFunc)
 	r, h, err := helper.Done()
 	assert.NoError(t, err)
 	assert.Nil(t, h)
@@ -190,7 +191,7 @@ func TestQueryResultHelper_Hash_FirstLevelSkipNeededInDone(t *testing.T) {
 }
 
 func buildTestResults(t *testing.T, enableHashing bool, maxDegree int, kvReads []*kvrwset.KVRead) ([]*kvrwset.KVRead, *kvrwset.QueryReadsMerkleSummary) {
-	helper, _ := NewRangeQueryResultsHelper(enableHashing, uint32(maxDegree))
+	helper, _ := NewRangeQueryResultsHelper(enableHashing, uint32(maxDegree), testHashFunc)
 	for _, kvRead := range kvReads {
 		helper.AddResult(kvRead)
 	}
@@ -212,13 +213,13 @@ func computeTestHashKVReads(t *testing.T, kvReads []*kvrwset.KVRead) Hash {
 	queryReads.KvReads = kvReads
 	b, err := proto.Marshal(queryReads)
 	assert.NoError(t, err)
-	h, err := bccspfactory.GetDefault().Hash(b, hashOpts)
-	assert.NoError(t, err)
+	h, err := testHashFunc(b)
+	require.NoError(t, err)
 	return h
 }
 
 func computeTestCombinedHash(t *testing.T, hashes ...Hash) Hash {
-	h, err := computeCombinedHash(hashes)
+	h, err := computeCombinedHash(hashes, testHashFunc)
 	assert.NoError(t, err)
 	return h
 }

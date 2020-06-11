@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"math"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/capabilities"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/msp"
-	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/pkg/errors"
 )
 
@@ -138,7 +138,7 @@ func (cc *ChannelConfig) ConsortiumsConfig() *ConsortiumsConfig {
 	return cc.consortiumsConfig
 }
 
-// HashingAlgorithm returns a function pointer to the chain hashing algorihtm
+// HashingAlgorithm returns a function pointer to the chain hashing algorithm
 func (cc *ChannelConfig) HashingAlgorithm() func(input []byte) []byte {
 	return cc.hashingAlgorithm
 }

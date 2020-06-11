@@ -14,19 +14,20 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
+	etcdraftproto "github.com/hyperledger/fabric-protos-go/orderer/etcdraft"
+	"github.com/hyperledger/fabric/bccsp/sw"
+	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
 	"github.com/hyperledger/fabric/common/flogging"
-	mockconfig "github.com/hyperledger/fabric/common/mocks/config"
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	clustermocks "github.com/hyperledger/fabric/orderer/common/cluster/mocks"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
 	"github.com/hyperledger/fabric/orderer/consensus/etcdraft"
 	"github.com/hyperledger/fabric/orderer/consensus/etcdraft/mocks"
 	consensusmocks "github.com/hyperledger/fabric/orderer/consensus/mocks"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
-	etcdraftproto "github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -34,6 +35,18 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+//go:generate counterfeiter -o mocks/orderer_capabilities.go --fake-name OrdererCapabilities . ordererCapabilities
+
+type ordererCapabilities interface {
+	channelconfig.OrdererCapabilities
+}
+
+//go:generate counterfeiter -o mocks/orderer_config.go --fake-name OrdererConfig . ordererConfig
+
+type ordererConfig interface {
+	channelconfig.Orderer
+}
 
 var _ = Describe("Consenter", func() {
 	var (
@@ -99,9 +112,11 @@ var _ = Describe("Consenter", func() {
 	})
 
 	When("the consenter is asked for a chain", func() {
-		chainInstance := &etcdraft.Chain{}
+		cryptoProvider, _ := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+		chainInstance := &etcdraft.Chain{CryptoProvider: cryptoProvider}
 		cs := &multichannel.ChainSupport{
 			Chain: chainInstance,
+			BCCSP: cryptoProvider,
 		}
 		BeforeEach(func() {
 			chainGetter.On("GetChain", "mychannel").Return(cs)
@@ -159,10 +174,14 @@ var _ = Describe("Consenter", func() {
 			},
 		}
 		metadata := protoutil.MarshalOrPanic(m)
-		support.SharedConfigReturns(&mockconfig.Orderer{
-			ConsensusMetadataVal: metadata,
-			BatchSizeVal:         &orderer.BatchSize{PreferredMaxBytes: 2 * 1024 * 1024},
-		})
+		mockOrderer := &mocks.OrdererConfig{}
+		mockOrderer.ConsensusMetadataReturns(metadata)
+		mockOrderer.BatchSizeReturns(
+			&orderer.BatchSize{
+				PreferredMaxBytes: 2 * 1024 * 1024,
+			},
+		)
+		support.SharedConfigReturns(mockOrderer)
 
 		consenter := newConsenter(chainGetter)
 		consenter.EtcdRaftConfig.WALDir = walDir
@@ -199,11 +218,15 @@ var _ = Describe("Consenter", func() {
 		}
 		metadata := protoutil.MarshalOrPanic(m)
 		support := &consensusmocks.FakeConsenterSupport{}
-		support.SharedConfigReturns(&mockconfig.Orderer{
-			ConsensusMetadataVal: metadata,
-			BatchSizeVal:         &orderer.BatchSize{PreferredMaxBytes: 2 * 1024 * 1024},
-		})
-		support.ChainIDReturns("foo")
+		mockOrderer := &mocks.OrdererConfig{}
+		mockOrderer.ConsensusMetadataReturns(metadata)
+		mockOrderer.BatchSizeReturns(
+			&orderer.BatchSize{
+				PreferredMaxBytes: 2 * 1024 * 1024,
+			},
+		)
+		support.SharedConfigReturns(mockOrderer)
+		support.ChannelIDReturns("foo")
 
 		consenter := newConsenter(chainGetter)
 
@@ -221,10 +244,14 @@ var _ = Describe("Consenter", func() {
 			},
 		}
 		metadata := protoutil.MarshalOrPanic(m)
-		support.SharedConfigReturns(&mockconfig.Orderer{
-			ConsensusMetadataVal: metadata,
-			BatchSizeVal:         &orderer.BatchSize{PreferredMaxBytes: 2 * 1024 * 1024},
-		})
+		mockOrderer := &mocks.OrdererConfig{}
+		mockOrderer.ConsensusMetadataReturns(metadata)
+		mockOrderer.BatchSizeReturns(
+			&orderer.BatchSize{
+				PreferredMaxBytes: 2 * 1024 * 1024,
+			},
+		)
+		support.SharedConfigReturns(mockOrderer)
 
 		consenter := newConsenter(chainGetter)
 
@@ -246,11 +273,15 @@ var _ = Describe("Consenter", func() {
 			},
 		}
 		metadata := protoutil.MarshalOrPanic(m)
-		support.SharedConfigReturns(&mockconfig.Orderer{
-			ConsensusMetadataVal: metadata,
-			CapabilitiesVal:      &mockconfig.OrdererCapabilities{},
-			BatchSizeVal:         &orderer.BatchSize{PreferredMaxBytes: 2 * 1024 * 1024},
-		})
+		mockOrderer := &mocks.OrdererConfig{}
+		mockOrderer.ConsensusMetadataReturns(metadata)
+		mockOrderer.BatchSizeReturns(
+			&orderer.BatchSize{
+				PreferredMaxBytes: 2 * 1024 * 1024,
+			},
+		)
+		mockOrderer.CapabilitiesReturns(&mocks.OrdererCapabilities{})
+		support.SharedConfigReturns(mockOrderer)
 
 		consenter := newConsenter(chainGetter)
 
@@ -273,6 +304,10 @@ func newConsenter(chainGetter *mocks.ChainGetter) *consenter {
 	icr := &mocks.InactiveChainRegistry{}
 	icr.On("TrackChain", "foo", mock.Anything, mock.Anything)
 	certAsPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("cert bytes")})
+
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	Expect(err).NotTo(HaveOccurred())
+
 	c := &etcdraft.Consenter{
 		InactiveChainRegistry: icr,
 		Communication:         communicator,
@@ -290,6 +325,7 @@ func newConsenter(chainGetter *mocks.ChainGetter) *consenter {
 				},
 			},
 		},
+		BCCSP: cryptoProvider,
 	}
 	return &consenter{
 		Consenter: c,

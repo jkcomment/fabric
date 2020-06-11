@@ -12,13 +12,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/golang/protobuf/proto"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/util"
+	"github.com/hyperledger/fabric/core/chaincode/extcc"
+	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 )
 
@@ -33,28 +35,23 @@ const (
 
 // Runtime is used to manage chaincode runtime instances.
 type Runtime interface {
-	Start(ccid string) error
+	Build(ccid string) (*ccintf.ChaincodeServerInfo, error)
+	Start(ccid string, ccinfo *ccintf.PeerConnection) error
 	Stop(ccid string) error
 	Wait(ccid string) (int, error)
 }
 
 // Launcher is used to launch chaincode runtimes.
 type Launcher interface {
-	Launch(ccid string) error
+	Launch(ccid string, streamHandler extcc.StreamHandler) error
+	Stop(ccid string) error
 }
 
 // Lifecycle provides a way to retrieve chaincode definitions and the packages necessary to run them
 type Lifecycle interface {
-	// ChaincodeDefinition returns the details for a chaincode by name
-	ChaincodeDefinition(channelID, chaincodeName string, qe ledger.SimpleQueryExecutor) (ccprovider.ChaincodeDefinition, error)
-}
-
-// LegacyChaincodeDefinitions need to perform security checks whenever a chaincode definition
-// is looked up.  These security checks include checking the instantiation policy, as well
-// as performing the chaincode fingerprint matching, and other checks implemented in the legacy
-// packaging.
-type LegacyChaincodeDefinition interface {
-	ExecuteLegacySecurityChecks() error
+	// ChaincodeEndorsementInfo looks up the chaincode info in the given channel.  It is the responsibility
+	// of the implementation to add appropriate read dependencies for the information returned.
+	ChaincodeEndorsementInfo(channelID, chaincodeName string, qe ledger.SimpleQueryExecutor) (*lifecycle.ChaincodeEndorsementInfo, error)
 }
 
 // ChaincodeSupport responsible for providing interfacing with chaincodes from the Peer.
@@ -64,6 +61,7 @@ type ChaincodeSupport struct {
 	BuiltinSCCs            scc.BuiltinSCCs
 	DeployedCCInfoProvider ledger.DeployedChaincodeInfoProvider
 	ExecuteTimeout         time.Duration
+	InstallTimeout         time.Duration
 	HandlerMetrics         *HandlerMetrics
 	HandlerRegistry        *HandlerRegistry
 	Keepalive              time.Duration
@@ -83,7 +81,7 @@ func (cs *ChaincodeSupport) Launch(ccid string) (*Handler, error) {
 		return h, nil
 	}
 
-	if err := cs.Launcher.Launch(ccid); err != nil {
+	if err := cs.Launcher.Launch(ccid, cs); err != nil {
 		return nil, errors.Wrapf(err, "could not launch chaincode %s", ccid)
 	}
 
@@ -207,40 +205,31 @@ func (cs *ChaincodeSupport) Invoke(txParams *ccprovider.TransactionParams, chain
 // CheckInvocation inspects the parameters of an invocation and determines if, how, and to where a that invocation should be routed.
 // First, we ensure that the target namespace is defined on the channel and invokable on this peer, according to the lifecycle implementation.
 // Then, if the chaincode definition requires it, this function enforces 'init exactly once' semantics.
-// Finally, it returns the chaincode ID to route to and the message type of the request (normal transation, or init).
+// Finally, it returns the chaincode ID to route to and the message type of the request (normal transaction, or init).
 func (cs *ChaincodeSupport) CheckInvocation(txParams *ccprovider.TransactionParams, chaincodeName string, input *pb.ChaincodeInput) (ccid string, cctype pb.ChaincodeMessage_Type, err error) {
 	chaincodeLogger.Debugf("[%s] getting chaincode data for %s on channel %s", shorttxid(txParams.TxID), chaincodeName, txParams.ChannelID)
-	cd, err := cs.Lifecycle.ChaincodeDefinition(txParams.ChannelID, chaincodeName, txParams.TXSimulator)
+	cii, err := cs.Lifecycle.ChaincodeEndorsementInfo(txParams.ChannelID, chaincodeName, txParams.TXSimulator)
 	if err != nil {
 		logDevModeError(cs.UserRunsCC)
 		return "", 0, errors.Wrapf(err, "[channel %s] failed to get chaincode container info for %s", txParams.ChannelID, chaincodeName)
 	}
 
-	if legacyDefinition, ok := cd.(LegacyChaincodeDefinition); ok {
-		err = legacyDefinition.ExecuteLegacySecurityChecks()
-		if err != nil {
-			return "", 0, errors.WithMessagef(err, "[channel %s] failed the chaincode security checks for %s", txParams.ChannelID, chaincodeName)
-		}
-	}
-
 	needsInitialization := false
-	if cd.RequiresInit() {
-		// Note, RequiresInit() is only ever true for non-legacy definitions, and is always false for system chaincodes
-		// so performing this txSimulator read is safe.
+	if cii.EnforceInit {
 
 		value, err := txParams.TXSimulator.GetState(chaincodeName, InitializedKeyName)
 		if err != nil {
 			return "", 0, errors.WithMessage(err, "could not get 'initialized' key")
 		}
 
-		needsInitialization = !bytes.Equal(value, []byte(cd.CCVersion()))
+		needsInitialization = !bytes.Equal(value, []byte(cii.Version))
 	}
 
 	// Note, IsInit is a new field for v2.0 and should only be set for invocations of non-legacy chaincodes.
 	// Any invocation of a legacy chaincode with IsInit set will fail.  This is desirable, as the old
 	// InstantiationPolicy contract enforces which users may call init.
 	if input.IsInit {
-		if !cd.RequiresInit() {
+		if !cii.EnforceInit {
 			return "", 0, errors.Errorf("chaincode '%s' does not require initialization but called as init", chaincodeName)
 		}
 
@@ -248,19 +237,19 @@ func (cs *ChaincodeSupport) CheckInvocation(txParams *ccprovider.TransactionPara
 			return "", 0, errors.Errorf("chaincode '%s' is already initialized but called as init", chaincodeName)
 		}
 
-		err = txParams.TXSimulator.SetState(chaincodeName, InitializedKeyName, []byte(cd.CCVersion()))
+		err = txParams.TXSimulator.SetState(chaincodeName, InitializedKeyName, []byte(cii.Version))
 		if err != nil {
 			return "", 0, errors.WithMessage(err, "could not set 'initialized' key")
 		}
 
-		return cd.ChaincodeID(), pb.ChaincodeMessage_INIT, nil
+		return cii.ChaincodeID, pb.ChaincodeMessage_INIT, nil
 	}
 
 	if needsInitialization {
 		return "", 0, errors.Errorf("chaincode '%s' has not been initialized for this version, must call as init first", chaincodeName)
 	}
 
-	return cd.ChaincodeID(), pb.ChaincodeMessage_TRANSACTION, nil
+	return cii.ChaincodeID, pb.ChaincodeMessage_TRANSACTION, nil
 }
 
 // execute executes a transaction and waits for it to complete until a timeout value.
@@ -279,12 +268,42 @@ func (cs *ChaincodeSupport) execute(cctyp pb.ChaincodeMessage_Type, txParams *cc
 		ChannelId: txParams.ChannelID,
 	}
 
-	ccresp, err := h.Execute(txParams, namespace, ccMsg, cs.ExecuteTimeout)
+	timeout := cs.executeTimeout(namespace, input)
+	ccresp, err := h.Execute(txParams, namespace, ccMsg, timeout)
 	if err != nil {
 		return nil, errors.WithMessage(err, "error sending")
 	}
 
 	return ccresp, nil
+}
+
+func (cs *ChaincodeSupport) executeTimeout(namespace string, input *pb.ChaincodeInput) time.Duration {
+	operation := chaincodeOperation(input.Args)
+	switch {
+	case namespace == "lscc" && operation == "install":
+		return maxDuration(cs.InstallTimeout, cs.ExecuteTimeout)
+	case namespace == lifecycle.LifecycleNamespace && operation == lifecycle.InstallChaincodeFuncName:
+		return maxDuration(cs.InstallTimeout, cs.ExecuteTimeout)
+	default:
+		return cs.ExecuteTimeout
+	}
+}
+
+func maxDuration(durations ...time.Duration) time.Duration {
+	var result time.Duration
+	for _, d := range durations {
+		if d > result {
+			result = d
+		}
+	}
+	return result
+}
+
+func chaincodeOperation(args [][]byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return string(args[0])
 }
 
 func logDevModeError(userRunsCC bool) {

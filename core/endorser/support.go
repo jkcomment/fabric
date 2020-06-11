@@ -9,18 +9,19 @@ package endorser
 import (
 	"fmt"
 
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/core/chaincode"
+	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/handlers/decoration"
-	. "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
+	endorsement "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
 	"github.com/hyperledger/fabric/core/handlers/library"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/scc"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 )
 
@@ -50,7 +51,7 @@ func (s *SupportImpl) NewQueryCreator(channel string) (QueryCreator, error) {
 	return lgr, nil
 }
 
-func (s *SupportImpl) SigningIdentityForRequest(*pb.SignedProposal) (SigningIdentity, error) {
+func (s *SupportImpl) SigningIdentityForRequest(*pb.SignedProposal) (endorsement.SigningIdentity, error) {
 	return s.SignerSerializer, nil
 }
 
@@ -125,9 +126,9 @@ func (s *SupportImpl) Execute(txParams *ccprovider.TransactionParams, name strin
 	return s.ChaincodeSupport.Execute(txParams, name, input)
 }
 
-// GetChaincodeDefinition returns ccprovider.ChaincodeDefinition for the chaincode with the supplied name
-func (s *SupportImpl) GetChaincodeDefinition(channelID, chaincodeName string, txsim ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error) {
-	return s.ChaincodeSupport.Lifecycle.ChaincodeDefinition(channelID, chaincodeName, txsim)
+// ChaincodeEndorsementInfo returns info needed to endorse a tx for the chaincode with the supplied name.
+func (s *SupportImpl) ChaincodeEndorsementInfo(channelID, chaincodeName string, txsim ledger.QueryExecutor) (*lifecycle.ChaincodeEndorsementInfo, error) {
+	return s.ChaincodeSupport.Lifecycle.ChaincodeEndorsementInfo(channelID, chaincodeName, txsim)
 }
 
 // CheckACL checks the ACL for the resource for the Channel using the

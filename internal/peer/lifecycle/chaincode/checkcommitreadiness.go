@@ -15,10 +15,11 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	lb "github.com/hyperledger/fabric-protos-go/peer/lifecycle"
+	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -51,7 +52,7 @@ type CommitReadinessCheckInput struct {
 	EndorsementPlugin        string
 	ValidationPlugin         string
 	ValidationParameterBytes []byte
-	CollectionConfigPackage  *cb.CollectionConfigPackage
+	CollectionConfigPackage  *pb.CollectionConfigPackage
 	InitRequired             bool
 	PeerAddresses            []string
 	TxID                     string
@@ -81,11 +82,11 @@ func (c *CommitReadinessCheckInput) Validate() error {
 
 // CheckCommitReadinessCmd returns the cobra command for the
 // CheckCommitReadiness lifecycle operation
-func CheckCommitReadinessCmd(c *CommitReadinessChecker) *cobra.Command {
+func CheckCommitReadinessCmd(c *CommitReadinessChecker, cryptoProvider bccsp.BCCSP) *cobra.Command {
 	chaincodeCheckCommitReadinessCmd := &cobra.Command{
 		Use:   "checkcommitreadiness",
-		Short: fmt.Sprintf("Check whether a chaincode definition is ready to be committed on a channel."),
-		Long:  fmt.Sprintf("Check whether a chaincode definition is ready to be committed on a channel."),
+		Short: "Check whether a chaincode definition is ready to be committed on a channel.",
+		Long:  "Check whether a chaincode definition is ready to be committed on a channel.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if c == nil {
 				// set input from CLI flags
@@ -104,7 +105,7 @@ func CheckCommitReadinessCmd(c *CommitReadinessChecker) *cobra.Command {
 					TLSEnabled:            viper.GetBool("peer.tls.enabled"),
 				}
 
-				cc, err := NewClientConnections(ccInput)
+				cc, err := NewClientConnections(ccInput, cryptoProvider)
 				if err != nil {
 					return err
 				}

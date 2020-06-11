@@ -12,41 +12,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/deliverservice"
-	"github.com/hyperledger/fabric/core/deliverservice/blocksprovider"
-	"github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/core/transientstore"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/election"
 	"github.com/hyperledger/fabric/gossip/util"
-	"github.com/hyperledger/fabric/protos/ledger/rwset"
-	transientstore2 "github.com/hyperledger/fabric/protos/transientstore"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
+	"github.com/hyperledger/fabric/internal/pkg/peer/blocksprovider"
+	"github.com/hyperledger/fabric/internal/pkg/peer/orderers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-type transientStoreMock struct {
-}
-
-func (*transientStoreMock) PurgeByHeight(maxBlockNumToRetain uint64) error {
-	return nil
-}
-
-func (*transientStoreMock) Persist(txid string, blockHeight uint64, privateSimulationResults *rwset.TxPvtReadWriteSet) error {
-	panic("implement me")
-}
-
-func (*transientStoreMock) PersistWithConfig(txid string, blockHeight uint64, privateSimulationResultsWithConfig *transientstore2.TxPvtReadWriteSetWithConfigInfo) error {
-	panic("implement me")
-}
-
-func (*transientStoreMock) GetTxPvtRWSetByTxid(txid string, filter ledger.PvtNsCollFilter) (transientstore.RWSetScanner, error) {
-	panic("implement me")
-}
-
-func (*transientStoreMock) PurgeByTxids(txids []string) error {
-	panic("implement me")
-}
 
 type embeddingDeliveryService struct {
 	startOnce sync.Once
@@ -95,12 +71,9 @@ type embeddingDeliveryServiceFactory struct {
 	DeliveryServiceFactory
 }
 
-func (edsf *embeddingDeliveryServiceFactory) Service(g GossipServiceAdapter, endpoints []string, mcs api.MessageCryptoService) (deliverservice.DeliverService, error) {
-	ds, err := edsf.DeliveryServiceFactory.Service(g, endpoints, mcs)
-	if err != nil {
-		panic(err)
-	}
-	return newEmbeddingDeliveryService(ds), nil
+func (edsf *embeddingDeliveryServiceFactory) Service(g GossipServiceAdapter, endpoints *orderers.ConnectionSource, mcs api.MessageCryptoService, isStaticLeader bool) deliverservice.DeliverService {
+	ds := edsf.DeliveryServiceFactory.Service(g, endpoints, mcs, false)
+	return newEmbeddingDeliveryService(ds)
 }
 
 func TestLeaderYield(t *testing.T) {
@@ -125,17 +98,20 @@ func TestLeaderYield(t *testing.T) {
 		ElectionLeaderElectionDuration: time.Millisecond * 500,
 	}
 	n := 2
-	gossips := startPeers(t, serviceConfig, n, 0, 1)
+	gossips := startPeers(serviceConfig, n, 0, 1)
 	defer stopPeers(gossips)
 	channelName := "channelA"
 	peerIndexes := []int{0, 1}
 	// Add peers to the channel
-	addPeersToChannel(t, n, channelName, gossips, peerIndexes)
+	addPeersToChannel(channelName, gossips, peerIndexes)
 	// Prime the membership view of the peers
 	waitForFullMembershipOrFailNow(t, channelName, gossips, n, time.Second*30, time.Millisecond*100)
 
-	endpoint, socket := getAvailablePort(t)
-	socket.Close()
+	grpcClient, err := comm.NewGRPCClient(comm.ClientConfig{})
+	require.NoError(t, err)
+
+	store := newTransientStore(t)
+	defer store.tearDown()
 
 	// Helper function that creates a gossipService instance
 	newGossipService := func(i int) *GossipService {
@@ -148,10 +124,10 @@ func TestLeaderYield(t *testing.T) {
 				ReconnectTotalTimeThreshold: time.Second,
 				ConnectionTimeout:           time.Millisecond * 100,
 			},
+			deliverGRPCClient: grpcClient,
 		}}
-		gs.InitializeChannel(channelName, []string{endpoint}, Support{
+		gs.InitializeChannel(channelName, orderers.NewConnectionSource(flogging.MustGetLogger("peer.orderers"), nil), store.Store, Support{
 			Committer: &mockLedgerInfo{1},
-			Store:     &transientStoreMock{},
 		})
 		return gs
 	}

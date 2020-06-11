@@ -17,16 +17,17 @@ import (
 	"testing"
 	"time"
 
+	pcommon "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/bccsp/sw"
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/integration"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
 	ic "github.com/hyperledger/fabric/internal/peer/chaincode"
 	"github.com/hyperledger/fabric/internal/peer/common"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/msp"
-	pcommon "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -58,6 +59,8 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 }, func(payload []byte) {
 	err := json.Unmarshal(payload, &components)
 	Expect(err).NotTo(HaveOccurred())
+
+	flogging.SetWriter(GinkgoWriter)
 })
 
 var _ = SynchronizedAfterSuite(func() {
@@ -69,30 +72,28 @@ func StartPort() int {
 	return integration.LifecyclePort.StartPortForNode()
 }
 
-func RunQueryInvokeQuery(n *nwo.Network, orderer *nwo.Orderer, peer *nwo.Peer, chaincodeName string, initialQueryResult int) {
-	RunQueryInvokeQueryWithAddresses(
-		n,
-		orderer,
-		peer,
-		chaincodeName,
-		initialQueryResult,
-		n.PeerAddress(n.Peer("org1", "peer1"), nwo.ListenPort),
-		n.PeerAddress(n.Peer("org2", "peer2"), nwo.ListenPort),
-	)
-}
+func RunQueryInvokeQuery(n *nwo.Network, orderer *nwo.Orderer, chaincodeName string, initialQueryResult int, peers ...*nwo.Peer) {
+	if len(peers) == 0 {
+		peers = n.PeersWithChannel("testchannel")
+	}
 
-func RunQueryInvokeQueryWithAddresses(n *nwo.Network, orderer *nwo.Orderer, peer *nwo.Peer, chaincodeName string, initialQueryResult int, addresses ...string) {
+	addresses := make([]string, len(peers))
+	for i, peer := range peers {
+		addresses[i] = n.PeerAddress(peer, nwo.ListenPort)
+	}
+
 	By("querying the chaincode")
-	sess, err := n.PeerUserSession(peer, "User1", commands.ChaincodeQuery{
+	sess, err := n.PeerUserSession(peers[0], "User1", commands.ChaincodeQuery{
 		ChannelID: "testchannel",
 		Name:      chaincodeName,
 		Ctor:      `{"Args":["query","a"]}`,
 	})
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
-	Expect(sess).To(gbytes.Say(fmt.Sprint(initialQueryResult)))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+	ExpectWithOffset(1, sess).To(gbytes.Say(fmt.Sprint(initialQueryResult)))
 
-	sess, err = n.PeerUserSession(peer, "User1", commands.ChaincodeInvoke{
+	By("invoking the chaincode")
+	sess, err = n.PeerUserSession(peers[0], "User1", commands.ChaincodeInvoke{
 		ChannelID:     "testchannel",
 		Orderer:       n.OrdererAddress(orderer, nwo.ListenPort),
 		Name:          chaincodeName,
@@ -100,18 +101,19 @@ func RunQueryInvokeQueryWithAddresses(n *nwo.Network, orderer *nwo.Orderer, peer
 		PeerAddresses: addresses,
 		WaitForEvent:  true,
 	})
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
-	Expect(sess.Err).To(gbytes.Say("Chaincode invoke successful. result: status:200"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+	ExpectWithOffset(1, sess.Err).To(gbytes.Say("Chaincode invoke successful. result: status:200"))
 
-	sess, err = n.PeerUserSession(peer, "User1", commands.ChaincodeQuery{
+	By("querying the chaincode")
+	sess, err = n.PeerUserSession(peers[0], "User1", commands.ChaincodeQuery{
 		ChannelID: "testchannel",
 		Name:      chaincodeName,
 		Ctor:      `{"Args":["query","a"]}`,
 	})
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
-	Expect(sess).To(gbytes.Say(fmt.Sprint(initialQueryResult - 10)))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+	ExpectWithOffset(1, sess).To(gbytes.Say(fmt.Sprint(initialQueryResult - 10)))
 }
 
 func RestartNetwork(process *ifrit.Process, network *nwo.Network) {
@@ -150,10 +152,10 @@ func LoadLocalMSPAt(dir, id, mspType string) (msp.MSP, error) {
 }
 
 func Signer(dir string) (msp.SigningIdentity, []byte) {
-	MSP, err := LoadLocalMSPAt(dir, "Org1ExampleCom", "bccsp")
+	MSP, err := LoadLocalMSPAt(dir, "Org1MSP", "bccsp")
 	Expect(err).To(BeNil())
 	Expect(MSP).NotTo(BeNil())
-	Expect(err).To(BeNil(), "failed getting singer for %s", dir)
+	Expect(err).To(BeNil(), "failed getting signer for %s", dir)
 	signer, err := MSP.GetDefaultSigningIdentity()
 	Expect(err).To(BeNil())
 	Expect(signer).NotTo(BeNil())

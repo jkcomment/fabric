@@ -11,10 +11,10 @@ import (
 	"reflect"
 	"testing"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/util"
-	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -61,8 +61,7 @@ func TestBlockDataHashingStructure(t *testing.T) {
 	cc = &ChannelConfig{protos: &ChannelProtos{BlockDataHashingStructure: &cb.BlockDataHashingStructure{Width: 7}}}
 	assert.Error(t, cc.validateBlockDataHashingStructure(), "Invalid Merkle tree width supplied")
 
-	var width uint32
-	width = math.MaxUint32
+	var width uint32 = math.MaxUint32
 	cc = &ChannelConfig{protos: &ChannelProtos{BlockDataHashingStructure: &cb.BlockDataHashingStructure{Width: width}}}
 	assert.NoError(t, cc.validateBlockDataHashingStructure(), "Valid Merkle tree width supplied")
 

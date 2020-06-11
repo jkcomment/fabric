@@ -16,6 +16,7 @@ import (
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
+	"github.com/hyperledger/fabric/integration/nwo/fabricconfig"
 	"github.com/hyperledger/fabric/integration/runner"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -27,6 +28,18 @@ import (
 const (
 	chaincodePathWithNoIndex = "github.com/hyperledger/fabric/integration/chaincode/marbles/cmd"
 	chaincodePathWithIndex   = "github.com/hyperledger/fabric/integration/chaincode/marbles/cmdwithindexspec"
+	chaincodePathWithIndexes = "github.com/hyperledger/fabric/integration/chaincode/marbles/cmdwithindexspecs"
+)
+
+var (
+	filesWithIndex = map[string]string{
+		"../chaincode/marbles/cmdwithindexspec/META-INF/statedb/couchdb/indexes/indexSizeSortDoc.json": "metadata/statedb/couchdb/indexes/indexSizeSortDoc.json",
+	}
+
+	filesWithIndices = map[string]string{
+		"../chaincode/marbles/cmdwithindexspecs/META-INF/statedb/couchdb/indexes/indexSizeSortDoc.json":  "metadata/statedb/couchdb/indexes/indexSizeSortDoc.json",
+		"../chaincode/marbles/cmdwithindexspecs/META-INF/statedb/couchdb/indexes/indexColorSortDoc.json": "metadata/statedb/couchdb/indexes/indexColorSortDoc.json",
+	}
 )
 
 var _ = Describe("CouchDB indexes", func() {
@@ -52,7 +65,16 @@ var _ = Describe("CouchDB indexes", func() {
 		client, err = docker.NewClientFromEnv()
 		Expect(err).NotTo(HaveOccurred())
 
-		network = nwo.New(nwo.BasicSolo(), testDir, client, StartPort(), components)
+		network = nwo.New(nwo.FullSolo(), testDir, client, StartPort(), components)
+
+		cwd, err := os.Getwd()
+		Expect(err).NotTo(HaveOccurred())
+		network.ExternalBuilders = append(network.ExternalBuilders, fabricconfig.ExternalBuilder{
+			Path:                 filepath.Join(cwd, "..", "externalbuilders", "golang"),
+			Name:                 "external-golang",
+			EnvironmentWhitelist: []string{"GOPATH", "GOCACHE", "GOPROXY", "HOME", "PATH"},
+		})
+
 		network.GenerateConfigTree()
 
 		// configure only one of four peers (Org1, peer0) to use couchdb.
@@ -92,8 +114,9 @@ var _ = Describe("CouchDB indexes", func() {
 		newlifecycleChaincode = nwo.Chaincode{
 			Name:            "marbles",
 			Version:         "0.0",
-			Path:            chaincodePathWithIndex,
-			Lang:            "golang",
+			Path:            components.Build(chaincodePathWithIndex),
+			Lang:            "binary",
+			CodeFiles:       filesWithIndex,
 			PackageFile:     filepath.Join(testDir, "marbles.tar.gz"),
 			SignaturePolicy: `OR ('Org1MSP.member','Org2MSP.member')`,
 			Sequence:        "1",
@@ -115,42 +138,95 @@ var _ = Describe("CouchDB indexes", func() {
 			nwo.PackageChaincodeLegacy(network, legacyChaincode, network.Peer("Org1", "peer0"))
 			nwo.InstallChaincodeLegacy(network, legacyChaincode, network.Peer("Org1", "peer0"))
 			nwo.InstantiateChaincodeLegacy(network, "testchannel", orderer, legacyChaincode, network.Peer("Org1", "peer0"), network.Peers...)
-			verifyIndexExists(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_indexed")
+			verifySizeIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
 		})
 	})
 
-	When("chaincode is defined and installed via new lifecycle", func() {
+	When("chaincode is deployed via new lifecycle (using the docker chaincode build) ", func() {
+		BeforeEach(func() {
+			newlifecycleChaincode.Path = chaincodePathWithIndex
+			newlifecycleChaincode.Lang = "golang"
+		})
+
 		It("creates indexes", func() {
 			nwo.EnableCapabilities(network, "testchannel", "Application", "V2_0", orderer, network.Peer("Org1", "peer0"), network.Peer("Org2", "peer0"))
 			nwo.DeployChaincode(network, "testchannel", orderer, newlifecycleChaincode, network.Peers...)
-			verifyIndexExists(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_indexed")
+			verifySizeIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
+		})
+	})
+
+	When("chaincode is defined and installed via new lifecycle and then upgraded with an additional index", func() {
+		It("creates indexes", func() {
+			nwo.EnableCapabilities(network, "testchannel", "Application", "V2_0", orderer, network.Peer("Org1", "peer0"), network.Peer("Org2", "peer0"))
+			nwo.DeployChaincode(network, "testchannel", orderer, newlifecycleChaincode, network.Peers...)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_indexed")
+			verifySizeIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
+			verifyColorIndexDoesNotExist(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
+
+			By("upgrading the chaincode to include an additional index")
+			newlifecycleChaincode.Sequence = "2"
+			newlifecycleChaincode.CodeFiles = filesWithIndices
+			newlifecycleChaincode.PackageFile = filepath.Join(testDir, "marbles-two-indexes.tar.gz")
+			newlifecycleChaincode.Label = "marbles-two-indexes"
+
+			nwo.PackageChaincodeBinary(newlifecycleChaincode)
+			nwo.InstallChaincode(network, newlifecycleChaincode, network.Peers...)
+			nwo.ApproveChaincodeForMyOrg(network, "testchannel", orderer, newlifecycleChaincode, network.Peers...)
+			nwo.CheckCommitReadinessUntilReady(network, "testchannel", newlifecycleChaincode, network.PeerOrgs(), network.Peers...)
+			nwo.CommitChaincode(network, "testchannel", orderer, newlifecycleChaincode, network.Peers[0], network.Peers...)
+
+			verifySizeIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
+			verifyColorIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
 		})
 	})
 
 	When("chaincode is installed and instantiated via legacy lifecycle and then defined and installed via new lifecycle", func() {
 		BeforeEach(func() {
 			legacyChaincode.Path = chaincodePathWithNoIndex
-			newlifecycleChaincode.Path = chaincodePathWithIndex
+			newlifecycleChaincode.CodeFiles = filesWithIndex
 		})
 
-		It("create indexes from the new lifecycle package", func() {
+		It("creates indexes from the new lifecycle package", func() {
 			By("instantiating and installing legacy chaincode")
 			nwo.PackageChaincodeLegacy(network, legacyChaincode, network.Peer("Org1", "peer0"))
 			nwo.InstallChaincodeLegacy(network, legacyChaincode, network.Peer("Org1", "peer0"))
 			nwo.InstantiateChaincodeLegacy(network, "testchannel", orderer, legacyChaincode, network.Peer("Org1", "peer0"), network.Peers...)
-			verifyIndexDoesNotExist(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_not_indexed")
+			verifySizeIndexDoesNotExist(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
 
 			By("installing and defining chaincode using new lifecycle")
 			nwo.EnableCapabilities(network, "testchannel", "Application", "V2_0", orderer, network.Peer("Org1", "peer0"), network.Peer("Org2", "peer0"))
 			nwo.DeployChaincode(network, "testchannel", orderer, newlifecycleChaincode)
-			verifyIndexExists(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_indexed")
+			verifySizeIndexExists(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
+		})
+	})
+
+	When("chaincode is installed and instantiated via legacy lifecycle with an external builder", func() {
+		BeforeEach(func() {
+			// This covers the legacy lifecycle + external builder scenario
+			legacyChaincode.Path = chaincodePathWithIndexes
+			legacyChaincode.Name = "marbles-external"
+		})
+
+		It("creates indexes from the new lifecycle package", func() {
+			peer := network.Peer("Org1", "peer0")
+
+			By("installing with the external chaincode builder")
+			nwo.PackageChaincodeLegacy(network, legacyChaincode, peer)
+			nwo.InstallChaincodeLegacy(network, legacyChaincode, peer)
+			nwo.InstantiateChaincodeLegacy(network, "testchannel", orderer, legacyChaincode, peer, peer)
+			initMarble(network, "testchannel", orderer, peer, legacyChaincode.Name, "marble_indexed")
+			verifySizeIndexExists(network, "testchannel", orderer, peer, legacyChaincode.Name)
 		})
 	})
 
 	When("chaincode is instantiated via legacy lifecycle, then defined and installed via new lifecycle and, finally installed via legacy lifecycle", func() {
 		BeforeEach(func() {
 			legacyChaincode.Path = chaincodePathWithIndex
-			newlifecycleChaincode.Path = chaincodePathWithNoIndex
+			newlifecycleChaincode.CodeFiles = nil
 		})
 
 		It("does not create indexes upon final installation of legacy chaincode", func() {
@@ -165,19 +241,20 @@ var _ = Describe("CouchDB indexes", func() {
 			By("installing and defining chaincode using new lifecycle")
 			nwo.EnableCapabilities(network, "testchannel", "Application", "V2_0", orderer, network.Peer("Org1", "peer0"), network.Peer("Org2", "peer0"))
 			nwo.DeployChaincode(network, "testchannel", orderer, newlifecycleChaincode)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_not_indexed")
 
 			By("installing legacy chaincode on Org1.peer0")
 			nwo.InstallChaincodeLegacy(network, legacyChaincode, network.Peer("Org1", "peer0"))
 
 			By("verifying that the index should not have been created on (Org1, peer0) - though the legacy package contains indexes")
-			verifyIndexDoesNotExist(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			verifySizeIndexDoesNotExist(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
 		})
 	})
 
 	When("chaincode is installed using legacy lifecycle, then defined and installed using new lifecycle", func() {
 		BeforeEach(func() {
 			legacyChaincode.Path = chaincodePathWithIndex
-			newlifecycleChaincode.Path = chaincodePathWithNoIndex
+			newlifecycleChaincode.CodeFiles = nil
 		})
 
 		It("does not use legacy package to create indexes", func() {
@@ -188,32 +265,48 @@ var _ = Describe("CouchDB indexes", func() {
 			By("installing and defining chaincode (without an index included) using new lifecycle")
 			nwo.EnableCapabilities(network, "testchannel", "Application", "V2_0", orderer, network.Peer("Org1", "peer0"), network.Peer("Org2", "peer0"))
 			nwo.DeployChaincode(network, "testchannel", orderer, newlifecycleChaincode)
+			initMarble(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles", "marble_not_indexed")
 
 			By("verifying that the index should not have been created - though the legacy package contains indexes")
-			verifyIndexDoesNotExist(network, "Org1", "peer0", "marbles", "testchannel", orderer)
+			verifySizeIndexDoesNotExist(network, "testchannel", orderer, network.Peer("Org1", "peer0"), "marbles")
 		})
 	})
 })
 
-func verifyIndexExists(n *nwo.Network, org string, peer string, ccname string, channel string, orderer *nwo.Orderer) {
-	verifyIndexPresence(n, org, peer, ccname, channel, orderer, true)
-}
-
-func verifyIndexDoesNotExist(n *nwo.Network, org string, peer string, ccname string, channel string, orderer *nwo.Orderer) {
-	verifyIndexPresence(n, org, peer, ccname, channel, orderer, false)
-}
-
-func verifyIndexPresence(n *nwo.Network, org string, peer string, ccname string, channel string, orderer *nwo.Orderer, expectIndexPresent bool) {
-	marbleName := "marble_not_indexed"
-	if expectIndexPresent {
-		marbleName = "marble_indexed"
-	}
+func initMarble(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName, marbleName string) {
 	By("invoking initMarble function of the chaincode")
-	commitTx(n, org, peer, ccname,
-		prepareChaincodeInvokeArgs("initMarble", marbleName, "blue", "35", "tom"),
-		channel, orderer)
+	sess, err := n.PeerUserSession(peer, "User1", commands.ChaincodeInvoke{
+		ChannelID: channel,
+		Orderer:   n.OrdererAddress(orderer, nwo.ListenPort),
+		Name:      ccName,
+		Ctor:      prepareChaincodeInvokeArgs("initMarble", marbleName, "blue", "35", "tom"),
+		PeerAddresses: []string{
+			n.PeerAddress(peer, nwo.ListenPort),
+		},
+		WaitForEvent: true,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())
+	Expect(sess.Err).To(gbytes.Say("Chaincode invoke successful."))
+}
 
-	By("invoking queryMarbles function with a user constructed query that requires an index due to a sort")
+func prepareChaincodeInvokeArgs(args ...string) string {
+	m, err := json.Marshal(map[string][]string{
+		"Args": args,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	return string(m)
+}
+
+func verifySizeIndexExists(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string) {
+	verifySizeIndexPresence(n, channel, orderer, peer, ccName, true)
+}
+
+func verifySizeIndexDoesNotExist(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string) {
+	verifySizeIndexPresence(n, channel, orderer, peer, ccName, false)
+}
+
+func verifySizeIndexPresence(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string, expectIndexPresent bool) {
 	query := `{
 		"selector":{
 			"docType":{
@@ -230,10 +323,43 @@ func verifyIndexPresence(n *nwo.Network, org string, peer string, ccname string,
 		"sort":[{"size":"desc"}],
 		"use_index":"_design/indexSizeSortDoc"
 	}`
-	sess, err := n.PeerUserSession(n.Peer(org, peer), "User1", commands.ChaincodeInvoke{
+	verifyIndexPresence(n, channel, orderer, peer, ccName, expectIndexPresent, query)
+}
+
+func verifyColorIndexExists(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string) {
+	verifyColorIndexPresence(n, channel, orderer, peer, ccName, true)
+}
+
+func verifyColorIndexDoesNotExist(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string) {
+	verifyColorIndexPresence(n, channel, orderer, peer, ccName, false)
+}
+
+func verifyColorIndexPresence(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string, expectIndexPresent bool) {
+	query := `{
+		"selector":{
+			"docType":{
+				"$eq":"marble"
+			},
+			"owner":{
+				"$eq":"tom"
+			},
+			"color":{
+				"$eq":"blue"
+			}
+		},
+		"fields":["docType","owner","size"],
+		"sort":[{"color":"desc"}],
+		"use_index":"_design/indexColorSortDoc"
+	}`
+	verifyIndexPresence(n, channel, orderer, peer, ccName, expectIndexPresent, query)
+}
+
+func verifyIndexPresence(n *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer, ccName string, expectIndexPresent bool, indexQuery string) {
+	By("invoking queryMarbles function with a user constructed query that requires an index due to a sort")
+	sess, err := n.PeerUserSession(peer, "User1", commands.ChaincodeInvoke{
 		ChannelID: channel,
-		Name:      ccname,
-		Ctor:      prepareChaincodeInvokeArgs("queryMarbles", query),
+		Name:      ccName,
+		Ctor:      prepareChaincodeInvokeArgs("queryMarbles", indexQuery),
 	})
 	Expect(err).NotTo(HaveOccurred())
 	if expectIndexPresent {
@@ -243,28 +369,4 @@ func verifyIndexPresence(n *nwo.Network, org string, peer string, ccname string,
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())
 		Expect(sess.Err).To(gbytes.Say("Error:no_usable_index"))
 	}
-}
-
-func commitTx(n *nwo.Network, org string, peer string, ccname string, args string, channel string, orderer *nwo.Orderer) {
-	sess, err := n.PeerUserSession(n.Peer(org, peer), "User1", commands.ChaincodeInvoke{
-		ChannelID: channel,
-		Orderer:   n.OrdererAddress(orderer, nwo.ListenPort),
-		Name:      ccname,
-		Ctor:      args,
-		PeerAddresses: []string{
-			n.PeerAddress(n.Peer(org, peer), nwo.ListenPort),
-		},
-		WaitForEvent: true,
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())
-	Expect(sess.Err).To(gbytes.Say("Chaincode invoke successful."))
-}
-
-func prepareChaincodeInvokeArgs(args ...string) string {
-	m, err := json.Marshal(map[string][]string{
-		"Args": args,
-	})
-	Expect(err).NotTo(HaveOccurred())
-	return string(m)
 }

@@ -12,11 +12,12 @@ import (
 	"strconv"
 	"sync"
 
+	lb "github.com/hyperledger/fabric-protos-go/peer/lifecycle"
 	"github.com/hyperledger/fabric/common/chaincode"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
+	"github.com/hyperledger/fabric/core/container/externalbuilder"
 	"github.com/hyperledger/fabric/core/ledger"
-	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
 	"github.com/hyperledger/fabric/protoutil"
 
 	"github.com/pkg/errors"
@@ -82,6 +83,8 @@ type Cache struct {
 	localChaincodes map[string]*LocalChaincode
 	eventBroker     *EventBroker
 	MetadataHandler MetadataHandler
+
+	chaincodeCustodian *ChaincodeCustodian
 }
 
 type LocalChaincode struct {
@@ -119,14 +122,15 @@ func (l *LocalChaincode) createMetadataMapFromReferences() map[string][]*chainco
 	return references
 }
 
-func NewCache(resources *Resources, myOrgMSPID string, metadataManager MetadataHandler) *Cache {
+func NewCache(resources *Resources, myOrgMSPID string, metadataManager MetadataHandler, custodian *ChaincodeCustodian, ebMetadata *externalbuilder.MetadataProvider) *Cache {
 	return &Cache{
-		definedChaincodes: map[string]*ChannelCache{},
-		localChaincodes:   map[string]*LocalChaincode{},
-		Resources:         resources,
-		MyOrgMSPID:        myOrgMSPID,
-		eventBroker:       NewEventBroker(resources.ChaincodeStore, resources.PackageParser),
-		MetadataHandler:   metadataManager,
+		chaincodeCustodian: custodian,
+		definedChaincodes:  map[string]*ChannelCache{},
+		localChaincodes:    map[string]*LocalChaincode{},
+		Resources:          resources,
+		MyOrgMSPID:         myOrgMSPID,
+		eventBroker:        NewEventBroker(resources.ChaincodeStore, resources.PackageParser, ebMetadata),
+		MetadataHandler:    metadataManager,
 	}
 }
 
@@ -145,11 +149,11 @@ func (c *Cache) InitializeLocalChaincodes() error {
 	for _, ccPackage := range ccPackages {
 		ccPackageBytes, err := c.Resources.ChaincodeStore.Load(ccPackage.PackageID)
 		if err != nil {
-			return errors.WithMessagef(err, "could not load chaincode with pakcage ID '%s'", ccPackage.PackageID)
+			return errors.WithMessagef(err, "could not load chaincode with package ID '%s'", ccPackage.PackageID)
 		}
 		parsedCCPackage, err := c.Resources.PackageParser.Parse(ccPackageBytes)
 		if err != nil {
-			return errors.WithMessagef(err, "could not parse chaincode with pakcage ID '%s'", ccPackage.PackageID)
+			return errors.WithMessagef(err, "could not parse chaincode with package ID '%s'", ccPackage.PackageID)
 		}
 		c.handleChaincodeInstalledWhileLocked(true, parsedCCPackage.Metadata, ccPackage.PackageID)
 	}
@@ -173,6 +177,11 @@ func (c *Cache) InitializeLocalChaincodes() error {
 	}
 
 	return nil
+}
+
+// Name returns the name of the listener
+func (c *Cache) Name() string {
+	return "lifecycle cache listener"
 }
 
 // Initialize will populate the set of currently committed chaincode definitions
@@ -227,6 +236,7 @@ func (c *Cache) handleChaincodeInstalledWhileLocked(initializing bool, md *persi
 			References: map[string]map[string]*CachedChaincodeDefinition{},
 		}
 		c.localChaincodes[hashOfCCHash] = localChaincode
+		c.chaincodeCustodian.NotifyInstalled(packageID)
 	}
 	localChaincode.Info = &ChaincodeInstallInfo{
 		PackageID: packageID,
@@ -238,6 +248,7 @@ func (c *Cache) handleChaincodeInstalledWhileLocked(initializing bool, md *persi
 		for chaincodeName, cachedChaincode := range channelCache {
 			cachedChaincode.InstallInfo = localChaincode.Info
 			logger.Infof("Installed chaincode with package ID '%s' now available on channel %s for chaincode definition %s:%s", packageID, channelID, chaincodeName, cachedChaincode.Definition.EndorsementInfo.Version)
+			c.chaincodeCustodian.NotifyInstalledAndRunnable(packageID)
 		}
 	}
 
@@ -315,7 +326,7 @@ func (c *Cache) StateCommitDone(channelName string) {
 	// between HandleStateUpdate and StateCommitDone, it's possible (in fact likely)
 	// that a chaincode invocation will acquire a read-lock on the world state, then attempt
 	// to get chaincode info from the cache, resulting in a deadlock.  So, we choose
-	// potential inconsistenty between the cache and the world state which the callers
+	// potential inconsistency between the cache and the world state which the callers
 	// must detect and cope with as necessary.  Note, the cache will always be _at least_
 	// as current as the committed state.
 	c.eventBroker.ApproveOrDefineCommitted(channelName)
@@ -324,6 +335,17 @@ func (c *Cache) StateCommitDone(channelName string) {
 // ChaincodeInfo returns the chaincode definition and its install info.
 // An error is returned only if either the channel or the chaincode do not exist.
 func (c *Cache) ChaincodeInfo(channelID, name string) (*LocalChaincodeInfo, error) {
+	if name == LifecycleNamespace {
+		ac, ok := c.Resources.ChannelConfigSource.GetStableChannelConfig(channelID).ApplicationConfig()
+		if !ok {
+			return nil, errors.Errorf("application config does not exist for channel '%s'", channelID)
+		}
+		if !ac.Capabilities().LifecycleV20() {
+			return nil, errors.Errorf("cannot use _lifecycle without V2_0 application capabilities enabled for channel '%s'", channelID)
+		}
+		return c.getLifecycleSCCChaincodeInfo(channelID)
+	}
+
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	channelChaincodes, ok := c.definedChaincodes[channelID]
@@ -340,6 +362,24 @@ func (c *Cache) ChaincodeInfo(channelID, name string) (*LocalChaincodeInfo, erro
 		Definition:  cachedChaincode.Definition,
 		InstallInfo: cachedChaincode.InstallInfo,
 		Approved:    cachedChaincode.Approved,
+	}, nil
+}
+
+func (c *Cache) getLifecycleSCCChaincodeInfo(channelID string) (*LocalChaincodeInfo, error) {
+	policyBytes, err := c.Resources.LifecycleEndorsementPolicyAsBytes(channelID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &LocalChaincodeInfo{
+		Definition: &ChaincodeDefinition{
+			ValidationInfo: &lb.ChaincodeValidationInfo{
+				ValidationParameter: policyBytes,
+			},
+			Sequence: 1,
+		},
+		Approved:    true,
+		InstallInfo: &ChaincodeInstallInfo{},
 	}, nil
 }
 
@@ -428,10 +468,60 @@ func (c *Cache) update(initializing bool, channelID string, dirtyChaincodes map[
 			continue
 		}
 
+		privateName := fmt.Sprintf("%s#%d", name, chaincodeDefinition.Sequence)
+		hashKey := FieldKey(ChaincodeSourcesName, privateName, "PackageID")
+		hashOfCCHash, err := orgState.GetStateHash(hashKey)
+		if err != nil {
+			return errors.WithMessagef(err, "could not check opaque org state for chaincode source hash for '%s' on channel '%s'", name, channelID)
+		}
+
+		localChaincode, ok := c.localChaincodes[string(hashOfCCHash)]
+		if !ok {
+			localChaincode = &LocalChaincode{
+				References: map[string]map[string]*CachedChaincodeDefinition{},
+			}
+			c.localChaincodes[string(hashOfCCHash)] = localChaincode
+		}
+
+		if !initializing {
+			// check for existing local chaincodes that reference this chaincode
+			// name on this channel
+			for _, lc := range c.localChaincodes {
+				if ref, ok := lc.References[channelID][name]; ok {
+					if ref.InstallInfo == nil || localChaincode.Info == nil {
+						continue
+					}
+					if ref.InstallInfo.PackageID == localChaincode.Info.PackageID {
+						continue
+					}
+
+					// remove existing local chaincode reference, which referred to a
+					// previous chaincode definition
+					delete(lc.References[channelID], name)
+					if len(lc.References[channelID]) == 0 {
+						delete(lc.References, channelID)
+
+						// check to see if this "local" chaincode is installed (an entry
+						// is added into local chaincodes for active chaincode definition
+						// references regardless of whether the peer has a chaincode
+						// package installed)
+						if lc.Info == nil {
+							continue
+						}
+
+						// finally, check to see if this chaincode is referenced in any
+						// channel. if not, stop the chaincode here
+						if len(lc.References) == 0 {
+							logger.Debugf("chaincode package with label %s is no longer referenced and will be stopped", lc.Info.Label)
+							c.chaincodeCustodian.NotifyStoppable(lc.Info.PackageID)
+						}
+					}
+				}
+			}
+		}
+
 		cachedChaincode.Definition = chaincodeDefinition
 		cachedChaincode.Approved = false
-
-		privateName := fmt.Sprintf("%s#%d", name, chaincodeDefinition.Sequence)
 
 		cachedChaincode.Hashes = []string{
 			string(util.ComputeSHA256([]byte(MetadataKey(NamespacesName, privateName)))),
@@ -467,23 +557,10 @@ func (c *Cache) update(initializing bool, channelID string, dirtyChaincodes map[
 			continue
 		}
 
-		hashKey := FieldKey(ChaincodeSourcesName, privateName, "PackageID")
-		hashOfCCHash, err := orgState.GetStateHash(hashKey)
-		if err != nil {
-			return errors.WithMessagef(err, "could not check opaque org state for chaincode source hash for '%s' on channel '%s'", name, channelID)
-		}
-
-		localChaincode, ok := c.localChaincodes[string(hashOfCCHash)]
-		if !ok {
-			localChaincode = &LocalChaincode{
-				References: map[string]map[string]*CachedChaincodeDefinition{},
-			}
-			c.localChaincodes[string(hashOfCCHash)] = localChaincode
-		}
-
 		cachedChaincode.InstallInfo = localChaincode.Info
 		if localChaincode.Info != nil {
 			logger.Infof("Chaincode with package ID '%s' now available on channel %s for chaincode definition %s:%s", localChaincode.Info.PackageID, channelID, name, cachedChaincode.Definition.EndorsementInfo.Version)
+			c.chaincodeCustodian.NotifyInstalledAndRunnable(localChaincode.Info.PackageID)
 		} else {
 			logger.Debugf("Chaincode definition for chaincode '%s' on channel '%s' is approved, but not installed", name, channelID)
 		}
@@ -495,6 +572,7 @@ func (c *Cache) update(initializing bool, channelID string, dirtyChaincodes map[
 		}
 
 		channelReferences[name] = cachedChaincode
+
 		if !initializing {
 			c.eventBroker.ProcessApproveOrDefineEvent(channelID, name, cachedChaincode)
 		}
@@ -507,7 +585,7 @@ func (c *Cache) update(initializing bool, channelID string, dirtyChaincodes map[
 	return nil
 }
 
-// RegisterListener registers an event listener for recieving an event when a chaincode becomes invokable
+// RegisterListener registers an event listener for receiving an event when a chaincode becomes invokable
 func (c *Cache) RegisterListener(channelID string, listener ledger.ChaincodeLifecycleEventListener) {
 	c.eventBroker.RegisterListener(channelID, listener)
 }
@@ -555,6 +633,24 @@ func (c *Cache) retrieveChaincodesMetadataSetWhileLocked(channelID string) (chai
 			},
 		)
 	}
+
+	// get the chaincode info for _lifecycle
+	lc, err := c.getLifecycleSCCChaincodeInfo(channelID)
+	if err != nil {
+		return nil, err
+	}
+
+	// add it to the metadataset so _lifecycle can also be queried
+	// via service discovery
+	metadataSet = append(metadataSet,
+		chaincode.Metadata{
+			Name:      LifecycleNamespace,
+			Version:   strconv.FormatInt(lc.Definition.Sequence, 10),
+			Policy:    lc.Definition.ValidationInfo.ValidationParameter,
+			Approved:  lc.Approved,
+			Installed: lc.InstallInfo != nil,
+		},
+	)
 
 	return metadataSet, nil
 }

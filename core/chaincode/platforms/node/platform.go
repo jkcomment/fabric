@@ -18,9 +18,9 @@ import (
 	"regexp"
 	"strings"
 
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/chaincode/platforms/util"
-	pb "github.com/hyperledger/fabric/protos/peer"
 )
 
 var logger = flogging.MustGetLogger("chaincode.platform.node")
@@ -166,7 +166,7 @@ func (p *Platform) GetDeploymentPayload(path string) ([]byte, error) {
 func (p *Platform) GenerateDockerfile() (string, error) {
 	var buf []string
 
-	buf = append(buf, "FROM "+util.GetDockerfileFromConfig("chaincode.node.runtime"))
+	buf = append(buf, "FROM "+util.GetDockerImageFromConfig("chaincode.node.runtime"))
 	buf = append(buf, "ADD binpackage.tar /usr/local/src")
 
 	dockerFileContents := strings.Join(buf, "\n")
@@ -174,9 +174,18 @@ func (p *Platform) GenerateDockerfile() (string, error) {
 	return dockerFileContents, nil
 }
 
+var buildScript = `
+set -e
+if [ -x /chaincode/build.sh ]; then
+	/chaincode/build.sh
+else
+	cp -R /chaincode/input/src/. /chaincode/output && cd /chaincode/output && npm install --production
+fi
+`
+
 func (p *Platform) DockerBuildOptions(path string) (util.DockerBuildOptions, error) {
 	return util.DockerBuildOptions{
-		Image: util.GetDockerfileFromConfig("chaincode.node.runtime"),
-		Cmd:   fmt.Sprint("cp -R /chaincode/input/src/. /chaincode/output && cd /chaincode/output && npm install --production"),
+		Image: util.GetDockerImageFromConfig("chaincode.node.runtime"),
+		Cmd:   buildScript,
 	}, nil
 }

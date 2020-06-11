@@ -13,10 +13,9 @@ import (
 	"io"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric/common/cauthdsl"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/common/policydsl"
 	"github.com/hyperledger/fabric/internal/peer/chaincode"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -84,7 +83,7 @@ func createPolicyBytes(signaturePolicy, channelConfigPolicy string) ([]byte, err
 
 	var applicationPolicy *pb.ApplicationPolicy
 	if signaturePolicy != "" {
-		signaturePolicyEnvelope, err := cauthdsl.FromString(signaturePolicy)
+		signaturePolicyEnvelope, err := policydsl.FromString(signaturePolicy)
 		if err != nil {
 			return nil, errors.Errorf("invalid signature policy: %s", signaturePolicy)
 		}
@@ -108,8 +107,8 @@ func createPolicyBytes(signaturePolicy, channelConfigPolicy string) ([]byte, err
 	return policyBytes, nil
 }
 
-func createCollectionConfigPackage(collectionsConfigFile string) (*cb.CollectionConfigPackage, error) {
-	var ccp *cb.CollectionConfigPackage
+func createCollectionConfigPackage(collectionsConfigFile string) (*pb.CollectionConfigPackage, error) {
+	var ccp *pb.CollectionConfigPackage
 	if collectionsConfigFile != "" {
 		var err error
 		ccp, _, err = chaincode.GetCollectionConfigFromFile(collectionsConfigFile)

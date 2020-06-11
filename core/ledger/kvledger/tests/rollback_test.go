@@ -12,7 +12,6 @@ import (
 
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -22,7 +21,6 @@ func TestRollbackKVLedger(t *testing.T) {
 	env.initLedgerMgmt()
 	// populate ledgers with sample data
 	dataHelper := newSampleDataHelper(t)
-	var blockchainsInfo []*common.BlockchainInfo
 
 	h := env.newTestHelperCreateLgr("testLedger", t)
 	// populate creates 8 blocks
@@ -30,7 +28,6 @@ func TestRollbackKVLedger(t *testing.T) {
 	dataHelper.verifyLedgerContent(h)
 	bcInfo, err := h.lgr.GetBlockchainInfo()
 	assert.NoError(t, err)
-	blockchainsInfo = append(blockchainsInfo, bcInfo)
 	env.closeLedgerMgmt()
 
 	// Rollback the testLedger (invalid rollback params)
@@ -48,7 +45,8 @@ func TestRollbackKVLedger(t *testing.T) {
 	rebuildable := rebuildableStatedb + rebuildableBookkeeper + rebuildableConfigHistory + rebuildableHistoryDB
 	env.verifyRebuilableDoesNotExist(rebuildable)
 	env.initLedgerMgmt()
-	preResetHt, err := kvledger.LoadPreResetHeight(env.initializer.Config.RootFSPath)
+	preResetHt, err := kvledger.LoadPreResetHeight(env.initializer.Config.RootFSPath, []string{"testLedger"})
+	assert.NoError(t, err)
 	assert.Equal(t, bcInfo.Height, preResetHt["testLedger"])
 	t.Logf("preResetHt = %#v", preResetHt)
 

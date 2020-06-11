@@ -24,6 +24,7 @@ var logger = flogging.MustGetLogger("chaincode.platform.util")
 type DockerBuildOptions struct {
 	Image        string
 	Cmd          string
+	Env          []string
 	InputStream  io.Reader
 	OutputStream io.Writer
 }
@@ -53,7 +54,7 @@ type DockerBuildOptions struct {
 //-------------------------------------------------------------------------------------------
 func DockerBuild(opts DockerBuildOptions, client *docker.Client) error {
 	if opts.Image == "" {
-		opts.Image = GetDockerfileFromConfig("chaincode.builder")
+		opts.Image = GetDockerImageFromConfig("chaincode.builder")
 		if opts.Image == "" {
 			return fmt.Errorf("No image provided and \"chaincode.builder\" default does not exist")
 		}
@@ -81,6 +82,7 @@ func DockerBuild(opts DockerBuildOptions, client *docker.Client) error {
 		Config: &docker.Config{
 			Image:        opts.Image,
 			Cmd:          []string{"/bin/sh", "-c", opts.Cmd},
+			Env:          opts.Env,
 			AttachStdout: true,
 			AttachStderr: true,
 		},
@@ -162,12 +164,22 @@ func DockerBuild(opts DockerBuildOptions, client *docker.Client) error {
 	return nil
 }
 
-func GetDockerfileFromConfig(path string) string {
+// GetDockerImageFromConfig replaces variables in the config
+func GetDockerImageFromConfig(path string) string {
 	r := strings.NewReplacer(
 		"$(ARCH)", runtime.GOARCH,
 		"$(PROJECT_VERSION)", metadata.Version,
-		"$(DOCKER_NS)", metadata.DockerNamespace,
-		"$(BASE_DOCKER_NS)", metadata.BaseDockerNamespace)
+		"$(TWO_DIGIT_VERSION)", twoDigitVersion(metadata.Version),
+		"$(DOCKER_NS)", metadata.DockerNamespace)
 
 	return r.Replace(viper.GetString(path))
+}
+
+// twoDigitVersion truncates a 3 digit version (e.g. 2.0.0) to a 2 digit version (e.g. 2.0),
+// If version does not include dots (e.g. latest), just return the passed version
+func twoDigitVersion(version string) string {
+	if strings.LastIndex(version, ".") < 0 {
+		return version
+	}
+	return version[0:strings.LastIndex(version, ".")]
 }

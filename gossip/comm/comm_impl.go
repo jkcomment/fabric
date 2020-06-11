@@ -17,13 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/identity"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
-	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -35,6 +35,10 @@ const (
 	DefConnTimeout   = time.Second * 2
 	DefRecvBuffSize  = 20
 	DefSendBuffSize  = 20
+)
+
+var (
+	errProbe = errors.New("probe")
 )
 
 // SecurityAdvisor defines an external auxiliary object
@@ -58,26 +62,27 @@ func NewCommInstance(s *grpc.Server, certs *common.TLSCertificates, idStore iden
 	commMetrics *metrics.CommMetrics, config CommConfig, dialOpts ...grpc.DialOption) (Comm, error) {
 
 	commInst := &commImpl{
-		sa:             sa,
-		pubSub:         util.NewPubSub(),
-		PKIID:          idStore.GetPKIidOfCert(peerIdentity),
-		idMapper:       idStore,
-		logger:         util.GetLogger(util.CommLogger, ""),
-		peerIdentity:   peerIdentity,
-		opts:           dialOpts,
-		secureDialOpts: secureDialOpts,
-		msgPublisher:   NewChannelDemultiplexer(),
-		lock:           &sync.Mutex{},
-		deadEndpoints:  make(chan common.PKIidType, 100),
-		stopping:       int32(0),
-		exitChan:       make(chan struct{}),
-		subscriptions:  make([]chan protoext.ReceivedMessage, 0),
-		tlsCerts:       certs,
-		metrics:        commMetrics,
-		dialTimeout:    config.DialTimeout,
-		connTimeout:    config.ConnTimeout,
-		recvBuffSize:   config.RecvBuffSize,
-		sendBuffSize:   config.SendBuffSize,
+		sa:              sa,
+		pubSub:          util.NewPubSub(),
+		PKIID:           idStore.GetPKIidOfCert(peerIdentity),
+		idMapper:        idStore,
+		logger:          util.GetLogger(util.CommLogger, ""),
+		peerIdentity:    peerIdentity,
+		opts:            dialOpts,
+		secureDialOpts:  secureDialOpts,
+		msgPublisher:    NewChannelDemultiplexer(),
+		lock:            &sync.Mutex{},
+		deadEndpoints:   make(chan common.PKIidType, 100),
+		identityChanges: make(chan common.PKIidType, 1),
+		stopping:        int32(0),
+		exitChan:        make(chan struct{}),
+		subscriptions:   make([]chan protoext.ReceivedMessage, 0),
+		tlsCerts:        certs,
+		metrics:         commMetrics,
+		dialTimeout:     config.DialTimeout,
+		connTimeout:     config.ConnTimeout,
+		recvBuffSize:    config.RecvBuffSize,
+		sendBuffSize:    config.SendBuffSize,
 	}
 
 	connConfig := ConnConfig{
@@ -101,28 +106,29 @@ type CommConfig struct {
 }
 
 type commImpl struct {
-	sa             api.SecurityAdvisor
-	tlsCerts       *common.TLSCertificates
-	pubSub         *util.PubSub
-	peerIdentity   api.PeerIdentityType
-	idMapper       identity.Mapper
-	logger         util.Logger
-	opts           []grpc.DialOption
-	secureDialOpts func() []grpc.DialOption
-	connStore      *connectionStore
-	PKIID          []byte
-	deadEndpoints  chan common.PKIidType
-	msgPublisher   *ChannelDeMultiplexer
-	lock           *sync.Mutex
-	exitChan       chan struct{}
-	stopWG         sync.WaitGroup
-	subscriptions  []chan protoext.ReceivedMessage
-	stopping       int32
-	metrics        *metrics.CommMetrics
-	dialTimeout    time.Duration
-	connTimeout    time.Duration
-	recvBuffSize   int
-	sendBuffSize   int
+	sa              api.SecurityAdvisor
+	tlsCerts        *common.TLSCertificates
+	pubSub          *util.PubSub
+	peerIdentity    api.PeerIdentityType
+	idMapper        identity.Mapper
+	logger          util.Logger
+	opts            []grpc.DialOption
+	secureDialOpts  func() []grpc.DialOption
+	connStore       *connectionStore
+	PKIID           []byte
+	deadEndpoints   chan common.PKIidType
+	identityChanges chan common.PKIidType
+	msgPublisher    *ChannelDeMultiplexer
+	lock            *sync.Mutex
+	exitChan        chan struct{}
+	stopWG          sync.WaitGroup
+	subscriptions   []chan protoext.ReceivedMessage
+	stopping        int32
+	metrics         *metrics.CommMetrics
+	dialTimeout     time.Duration
+	connTimeout     time.Duration
+	recvBuffSize    int
+	sendBuffSize    int
 }
 
 func (c *commImpl) createConnection(endpoint string, expectedPKIID common.PKIidType) (*connection, error) {
@@ -152,7 +158,7 @@ func (c *commImpl) createConnection(endpoint string, expectedPKIID common.PKIidT
 
 	cl := proto.NewGossipClient(cc)
 
-	ctx, cancel = context.WithTimeout(context.Background(), DefConnTimeout)
+	ctx, cancel = context.WithTimeout(context.Background(), c.connTimeout)
 	defer cancel()
 	if _, err = cl.Ping(ctx, &proto.Empty{}); err != nil {
 		cc.Close()
@@ -161,7 +167,7 @@ func (c *commImpl) createConnection(endpoint string, expectedPKIID common.PKIidT
 
 	ctx, cancel = context.WithCancel(context.Background())
 	if stream, err = cl.GossipStream(ctx); err == nil {
-		connInfo, err = c.authenticateRemotePeer(stream, true)
+		connInfo, err = c.authenticateRemotePeer(stream, true, false)
 		if err == nil {
 			pkiID = connInfo.ID
 			// PKIID is nil when we don't know the remote PKI id's
@@ -176,6 +182,9 @@ func (c *commImpl) createConnection(endpoint string, expectedPKIID common.PKIidT
 					cc.Close()
 					cancel()
 					return nil, errors.New("authentication failure")
+				} else {
+					c.logger.Infof("Peer %s changed its PKI-ID from %s to %s", endpoint, expectedPKIID, pkiID)
+					c.identityChanges <- expectedPKIID
 				}
 			}
 			connConfig := ConnConfig{
@@ -232,6 +241,7 @@ func (c *commImpl) sendToEndpoint(peer *RemotePeer, msg *protoext.SignedGossipMe
 		disConnectOnErr := func(err error) {
 			c.logger.Warningf("%v isn't responsive: %v", peer, err)
 			c.disconnect(peer.PKIID)
+			conn.close()
 		}
 		conn.send(msg, disConnectOnErr, shouldBlock)
 		return
@@ -265,7 +275,7 @@ func (c *commImpl) Probe(remotePeer *RemotePeer) error {
 	}
 	defer cc.Close()
 	cl := proto.NewGossipClient(cc)
-	ctx, cancel = context.WithTimeout(context.Background(), DefConnTimeout)
+	ctx, cancel = context.WithTimeout(context.Background(), c.connTimeout)
 	defer cancel()
 	_, err = cl.Ping(ctx, &proto.Empty{})
 	c.logger.Debugf("Returning %v", err)
@@ -287,7 +297,7 @@ func (c *commImpl) Handshake(remotePeer *RemotePeer) (api.PeerIdentityType, erro
 	defer cc.Close()
 
 	cl := proto.NewGossipClient(cc)
-	ctx, cancel = context.WithTimeout(context.Background(), DefConnTimeout)
+	ctx, cancel = context.WithTimeout(context.Background(), c.connTimeout)
 	defer cancel()
 	if _, err = cl.Ping(ctx, &proto.Empty{}); err != nil {
 		return nil, err
@@ -299,7 +309,7 @@ func (c *commImpl) Handshake(remotePeer *RemotePeer) (api.PeerIdentityType, erro
 	if err != nil {
 		return nil, err
 	}
-	connInfo, err := c.authenticateRemotePeer(stream, true)
+	connInfo, err := c.authenticateRemotePeer(stream, true, true)
 	if err != nil {
 		c.logger.Warningf("Authentication failed: %v", err)
 		return nil, err
@@ -352,6 +362,10 @@ func (c *commImpl) PresumedDead() <-chan common.PKIidType {
 	return c.deadEndpoints
 }
 
+func (c *commImpl) IdentitySwitch() <-chan common.PKIidType {
+	return c.identityChanges
+}
+
 func (c *commImpl) CloseConn(peer *RemotePeer) {
 	c.logger.Debug("Closing connection for", peer)
 	c.connStore.closeConnByPKIid(peer.PKIID)
@@ -394,7 +408,7 @@ func extractRemoteAddress(stream stream) string {
 	return remoteAddress
 }
 
-func (c *commImpl) authenticateRemotePeer(stream stream, initiator bool) (*protoext.ConnectionInfo, error) {
+func (c *commImpl) authenticateRemotePeer(stream stream, initiator, isProbe bool) (*protoext.ConnectionInfo, error) {
 	ctx := stream.Context()
 	remoteAddress := extractRemoteAddress(stream)
 	remoteCertHash := extractCertificateHashFromContext(ctx)
@@ -421,7 +435,7 @@ func (c *commImpl) authenticateRemotePeer(stream stream, initiator bool) (*proto
 		return nil, fmt.Errorf("No TLS certificate")
 	}
 
-	cMsg, err = c.createConnectionMsg(c.PKIID, selfCertHash, c.peerIdentity, signer)
+	cMsg, err = c.createConnectionMsg(c.PKIID, selfCertHash, c.peerIdentity, signer, isProbe)
 	if err != nil {
 		return nil, err
 	}
@@ -481,6 +495,10 @@ func (c *commImpl) authenticateRemotePeer(stream stream, initiator bool) (*proto
 	}
 
 	c.logger.Debug("Authenticated", remoteAddress)
+
+	if receivedMsg.Probe {
+		return connInfo, errProbe
+	}
 
 	return connInfo, nil
 }
@@ -546,7 +564,13 @@ func (c *commImpl) GossipStream(stream proto.Gossip_GossipStreamServer) error {
 	if c.isStopping() {
 		return fmt.Errorf("Shutting down")
 	}
-	connInfo, err := c.authenticateRemotePeer(stream, false)
+	connInfo, err := c.authenticateRemotePeer(stream, false, false)
+
+	if err == errProbe {
+		c.logger.Infof("Peer %s (%s) probed us", connInfo.ID, connInfo.Endpoint)
+		return nil
+	}
+
 	if err != nil {
 		c.logger.Errorf("Authentication failed: %v", err)
 		return err
@@ -578,10 +602,12 @@ func (c *commImpl) Ping(context.Context, *proto.Empty) (*proto.Empty, error) {
 }
 
 func (c *commImpl) disconnect(pkiID common.PKIidType) {
-	if c.isStopping() {
+	select {
+	case c.deadEndpoints <- pkiID:
+	case <-c.exitChan:
 		return
 	}
-	c.deadEndpoints <- pkiID
+
 	c.connStore.closeConnByPKIid(pkiID)
 }
 
@@ -608,7 +634,7 @@ func readWithTimeout(stream stream, timeout time.Duration, address string) (*pro
 	}
 }
 
-func (c *commImpl) createConnectionMsg(pkiID common.PKIidType, certHash []byte, cert api.PeerIdentityType, signer protoext.Signer) (*protoext.SignedGossipMessage, error) {
+func (c *commImpl) createConnectionMsg(pkiID common.PKIidType, certHash []byte, cert api.PeerIdentityType, signer protoext.Signer, isProbe bool) (*protoext.SignedGossipMessage, error) {
 	m := &proto.GossipMessage{
 		Tag:   proto.GossipMessage_EMPTY,
 		Nonce: 0,
@@ -617,6 +643,7 @@ func (c *commImpl) createConnectionMsg(pkiID common.PKIidType, certHash []byte, 
 				TlsCertHash: certHash,
 				Identity:    cert,
 				PkiId:       pkiID,
+				Probe:       isProbe,
 			},
 		},
 	}

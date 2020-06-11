@@ -11,19 +11,20 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer/lifecycle"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/peer/lifecycle"
 	"github.com/hyperledger/fabric/protoutil"
+	"github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
-
-	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
 )
 
@@ -32,11 +33,12 @@ type Chaincode struct {
 	Version             string
 	Path                string
 	Ctor                string
-	Policy              string
+	Policy              string // only used for legacy lifecycle. For new lifecycle use SignaturePolicy
 	Lang                string
 	CollectionsConfig   string // optional
 	PackageFile         string
-	PackageID           string // if unspecified, chaincode won't be executable
+	PackageID           string            // if unspecified, chaincode won't be executable. Can use SetPackageIDFromPackageFile() to set.
+	CodeFiles           map[string]string // map from paths on the filesystem to code.tar.gz paths
 	Sequence            string
 	EndorsementPlugin   string
 	ValidationPlugin    string
@@ -107,8 +109,10 @@ func DeployChaincodeLegacy(n *Network, channel string, orderer *Orderer, chainco
 		chaincode.PackageFile = tempFile.Name()
 	}
 
-	// package using the first peer
-	PackageChaincodeLegacy(n, chaincode, peers[0])
+	// only create chaincode package if it doesn't already exist
+	if fi, err := os.Stat(chaincode.PackageFile); os.IsNotExist(err) || fi.Size() == 0 {
+		PackageChaincodeLegacy(n, chaincode, peers[0])
+	}
 
 	// install on all peers
 	InstallChaincodeLegacy(n, chaincode, peers...)
@@ -129,12 +133,13 @@ func PackageAndInstallChaincode(n *Network, chaincode Chaincode, peers ...*Peer)
 
 	// only create chaincode package if it doesn't already exist
 	if _, err := os.Stat(chaincode.PackageFile); os.IsNotExist(err) {
-		// package using the first peer
-		PackageChaincode(n, chaincode, peers[0])
+		switch chaincode.Lang {
+		case "binary":
+			PackageChaincodeBinary(chaincode)
+		default:
+			PackageChaincode(n, chaincode, peers[0])
+		}
 	}
-
-	// we set the PackageID so that we can pass it to the approve step
-	chaincode.SetPackageIDFromPackageFile()
 
 	// install on all peers
 	InstallChaincode(n, chaincode, peers...)
@@ -146,6 +151,7 @@ func PackageChaincode(n *Network, chaincode Chaincode, peer *Peer) {
 		Lang:       chaincode.Lang,
 		Label:      chaincode.Label,
 		OutputFile: chaincode.PackageFile,
+		ClientAuth: n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -158,24 +164,40 @@ func PackageChaincodeLegacy(n *Network, chaincode Chaincode, peer *Peer) {
 		Path:       chaincode.Path,
 		Lang:       chaincode.Lang,
 		OutputFile: chaincode.PackageFile,
+		ClientAuth: n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
 }
 
 func InstallChaincode(n *Network, chaincode Chaincode, peers ...*Peer) {
+	// Ensure 'jq' exists in path, because we need it to build chaincode
+	if _, err := exec.LookPath("jq"); err != nil {
+		ginkgo.Fail("'jq' is needed to build chaincode but it wasn't found in the PATH")
+	}
+
+	if chaincode.PackageID == "" {
+		chaincode.SetPackageIDFromPackageFile()
+	}
+
 	for _, p := range peers {
 		sess, err := n.PeerAdminSession(p, commands.ChaincodeInstall{
 			PackageFile: chaincode.PackageFile,
+			ClientAuth:  n.ClientAuthRequired,
 		})
-		Expect(err).NotTo(HaveOccurred())
-		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit())
 
 		EnsureInstalled(n, chaincode.Label, chaincode.PackageID, p)
 	}
 }
 
 func InstallChaincodeLegacy(n *Network, chaincode Chaincode, peers ...*Peer) {
+	// Ensure 'jq' exists in path, because we need it to build chaincode
+	if _, err := exec.LookPath("jq"); err != nil {
+		ginkgo.Fail("'jq' is needed to build chaincode but it wasn't found in the PATH")
+	}
+
 	for _, p := range peers {
 		sess, err := n.PeerAdminSession(p, commands.ChaincodeInstallLegacy{
 			Name:        chaincode.Name,
@@ -183,23 +205,23 @@ func InstallChaincodeLegacy(n *Network, chaincode Chaincode, peers ...*Peer) {
 			Path:        chaincode.Path,
 			Lang:        chaincode.Lang,
 			PackageFile: chaincode.PackageFile,
+			ClientAuth:  n.ClientAuthRequired,
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+		EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit(0))
 
-		sess, err = n.PeerAdminSession(p, commands.ChaincodeListInstalledLegacy{})
+		sess, err = n.PeerAdminSession(p, commands.ChaincodeListInstalledLegacy{
+			ClientAuth: n.ClientAuthRequired,
+		})
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
-		Expect(sess).To(gbytes.Say(fmt.Sprintf("Name: %s, Version: %s,", chaincode.Name, chaincode.Version)))
+		EventuallyWithOffset(1, sess, n.EventuallyTimeout).Should(gexec.Exit(0))
+		ExpectWithOffset(1, sess).To(gbytes.Say(fmt.Sprintf("Name: %s, Version: %s,", chaincode.Name, chaincode.Version)))
 	}
 }
 
 func ApproveChaincodeForMyOrg(n *Network, channel string, orderer *Orderer, chaincode Chaincode, peers ...*Peer) {
 	if chaincode.PackageID == "" {
-		pkgBytes, err := ioutil.ReadFile(chaincode.PackageFile)
-		Expect(err).NotTo(HaveOccurred())
-		hash := util.ComputeSHA256(pkgBytes)
-		chaincode.PackageID = fmt.Sprintf("%s:%x", chaincode.Label, hash)
+		chaincode.SetPackageIDFromPackageFile()
 	}
 
 	// used to ensure we only approve once per org
@@ -219,6 +241,7 @@ func ApproveChaincodeForMyOrg(n *Network, channel string, orderer *Orderer, chai
 				ChannelConfigPolicy: chaincode.ChannelConfigPolicy,
 				InitRequired:        chaincode.InitRequired,
 				CollectionsConfig:   chaincode.CollectionsConfig,
+				ClientAuth:          n.ClientAuthRequired,
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -228,15 +251,23 @@ func ApproveChaincodeForMyOrg(n *Network, channel string, orderer *Orderer, chai
 	}
 }
 
+func EnsureChaincodeApproved(n *Network, peer *Peer, channel, name, sequence string) {
+	sequenceInt, err := strconv.ParseInt(sequence, 10, 64)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(queryApproved(n, peer, channel, name, sequence), n.EventuallyTimeout).Should(
+		MatchFields(IgnoreExtras, Fields{
+			"Sequence": Equal(sequenceInt),
+		}),
+	)
+}
+
 func CheckCommitReadinessUntilReady(n *Network, channel string, chaincode Chaincode, checkOrgs []*Organization, peers ...*Peer) {
 	for _, p := range peers {
 		keys := Keys{}
 		for _, org := range checkOrgs {
 			keys[org.MSPID] = BeTrue()
 		}
-		Eventually(checkCommitReadiness(n, p, channel, chaincode), n.EventuallyTimeout).Should(
-			MatchKeys(IgnoreExtras, keys),
-		)
+		Eventually(checkCommitReadiness(n, p, channel, chaincode), n.EventuallyTimeout).Should(MatchKeys(IgnoreExtras, keys))
 	}
 }
 
@@ -264,6 +295,7 @@ func CommitChaincode(n *Network, channel string, orderer *Orderer, chaincode Cha
 		InitRequired:        chaincode.InitRequired,
 		CollectionsConfig:   chaincode.CollectionsConfig,
 		PeerAddresses:       peerAddresses,
+		ClientAuth:          n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -316,6 +348,7 @@ func InitChaincode(n *Network, channel string, orderer *Orderer, chaincode Chain
 		PeerAddresses: peerAddresses,
 		WaitForEvent:  true,
 		IsInit:        true,
+		ClientAuth:    n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -335,6 +368,7 @@ func InstantiateChaincodeLegacy(n *Network, channel string, orderer *Orderer, ch
 		Policy:            chaincode.Policy,
 		Lang:              chaincode.Lang,
 		CollectionsConfig: chaincode.CollectionsConfig,
+		ClientAuth:        n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -370,6 +404,7 @@ func UpgradeChaincodeLegacy(n *Network, channel string, orderer *Orderer, chainc
 		Ctor:              chaincode.Ctor,
 		Policy:            chaincode.Policy,
 		CollectionsConfig: chaincode.CollectionsConfig,
+		ClientAuth:        n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -379,7 +414,7 @@ func UpgradeChaincodeLegacy(n *Network, channel string, orderer *Orderer, chainc
 
 func EnsureInstalled(n *Network, label, packageID string, peers ...*Peer) {
 	for _, p := range peers {
-		Eventually(queryInstalled(n, p), n.EventuallyTimeout).Should(
+		Eventually(QueryInstalled(n, p), n.EventuallyTimeout).Should(
 			ContainElement(MatchFields(IgnoreExtras,
 				Fields{
 					"Label":     Equal(label),
@@ -399,7 +434,7 @@ func QueryInstalledReferences(n *Network, channel, label, packageID string, chec
 		}
 	}
 
-	Expect(queryInstalled(n, checkPeer)()).To(
+	Expect(QueryInstalled(n, checkPeer)()).To(
 		ContainElement(MatchFields(IgnoreExtras,
 			Fields{
 				"Label":     Equal(label),
@@ -414,13 +449,18 @@ func QueryInstalledReferences(n *Network, channel, label, packageID string, chec
 	)
 }
 
+func QueryInstalledNoReferences(n *Network, channel, label, packageID string, checkPeer *Peer) {
+}
+
 type queryInstalledOutput struct {
 	InstalledChaincodes []lifecycle.QueryInstalledChaincodesResult_InstalledChaincode `json:"installed_chaincodes"`
 }
 
-func queryInstalled(n *Network, peer *Peer) func() []lifecycle.QueryInstalledChaincodesResult_InstalledChaincode {
+func QueryInstalled(n *Network, peer *Peer) func() []lifecycle.QueryInstalledChaincodesResult_InstalledChaincode {
 	return func() []lifecycle.QueryInstalledChaincodesResult_InstalledChaincode {
-		sess, err := n.PeerAdminSession(peer, commands.ChaincodeQueryInstalled{})
+		sess, err := n.PeerAdminSession(peer, commands.ChaincodeQueryInstalled{
+			ClientAuth: n.ClientAuthRequired,
+		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
 		output := &queryInstalledOutput{}
@@ -447,6 +487,7 @@ func checkCommitReadiness(n *Network, peer *Peer, channel string, chaincode Chai
 			ChannelConfigPolicy: chaincode.ChannelConfigPolicy,
 			InitRequired:        chaincode.InitRequired,
 			CollectionsConfig:   chaincode.CollectionsConfig,
+			ClientAuth:          n.ClientAuthRequired,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -454,6 +495,34 @@ func checkCommitReadiness(n *Network, peer *Peer, channel string, chaincode Chai
 		err = json.Unmarshal(sess.Out.Contents(), output)
 		Expect(err).NotTo(HaveOccurred())
 		return output.Approvals
+	}
+}
+
+type queryApprovedOutput struct {
+	Sequence int64 `json:"sequence"`
+}
+
+// queryApproved returns the result of the queryApproved command.
+// If the command fails for any reason, it will return an empty output object.
+func queryApproved(n *Network, peer *Peer, channel, name, sequence string) func() queryApprovedOutput {
+	return func() queryApprovedOutput {
+		sess, err := n.PeerAdminSession(peer, commands.ChaincodeQueryApproved{
+			ChannelID:     channel,
+			Name:          name,
+			Sequence:      sequence,
+			PeerAddresses: []string{n.PeerAddress(peer, ListenPort)},
+			ClientAuth:    n.ClientAuthRequired,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())
+		output := &queryApprovedOutput{}
+		if sess.ExitCode() == 1 {
+			// don't try to unmarshal the output as JSON if the query failed
+			return *output
+		}
+		err = json.Unmarshal(sess.Out.Contents(), output)
+		Expect(err).NotTo(HaveOccurred())
+		return *output
 	}
 }
 
@@ -469,8 +538,9 @@ type queryCommittedOutput struct {
 func listCommitted(n *Network, peer *Peer, channel, name string) func() queryCommittedOutput {
 	return func() queryCommittedOutput {
 		sess, err := n.PeerAdminSession(peer, commands.ChaincodeListCommitted{
-			ChannelID: channel,
-			Name:      name,
+			ChannelID:  channel,
+			Name:       name,
+			ClientAuth: n.ClientAuthRequired,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())
@@ -488,7 +558,8 @@ func listCommitted(n *Network, peer *Peer, channel, name string) func() queryCom
 func listInstantiatedLegacy(n *Network, peer *Peer, channel string) func() *gbytes.Buffer {
 	return func() *gbytes.Buffer {
 		sess, err := n.PeerAdminSession(peer, commands.ChaincodeListInstantiatedLegacy{
-			ChannelID: channel,
+			ChannelID:  channel,
+			ClientAuth: n.ClientAuthRequired,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit(0))
@@ -536,7 +607,8 @@ func WaitUntilEqualLedgerHeight(n *Network, channel string, height int, peers ..
 // a channel
 func GetLedgerHeight(n *Network, peer *Peer, channel string) int {
 	sess, err := n.PeerUserSession(peer, "User1", commands.ChannelInfo{
-		ChannelID: channel,
+		ChannelID:  channel,
+		ClientAuth: n.ClientAuthRequired,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, n.EventuallyTimeout).Should(gexec.Exit())

@@ -8,22 +8,25 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hyperledger/fabric-config/protolator"
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp"
-	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policies"
-	"github.com/hyperledger/fabric/common/tools/protolator"
 	"github.com/hyperledger/fabric/common/util"
-	"github.com/hyperledger/fabric/core/comm"
-	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -130,7 +133,18 @@ func (dialer *PredicateDialer) Dial(address string, verifyFunc RemoteVerifier) (
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	return client.NewConnection(address, "")
+	return client.NewConnection(address, func(tlsConfig *tls.Config) {
+		// We need to dynamically overwrite the TLS root CAs,
+		// as they may be updated.
+		dialer.lock.RLock()
+		serverRootCAs := dialer.Config.Clone().SecOpts.ServerRootCAs
+		dialer.lock.RUnlock()
+
+		tlsConfig.RootCAs = x509.NewCertPool()
+		for _, pem := range serverRootCAs {
+			tlsConfig.RootCAs.AppendCertsFromPEM(pem)
+		}
+	})
 }
 
 // DERtoPEM returns a PEM representation of the DER
@@ -158,7 +172,7 @@ func (dialer *StandardDialer) Dial(endpointCriteria EndpointCriteria) (*grpc.Cli
 		return nil, errors.Wrap(err, "failed creating gRPC client")
 	}
 
-	return client.NewConnection(endpointCriteria.Endpoint, "")
+	return client.NewConnection(endpointCriteria.Endpoint)
 }
 
 //go:generate mockery -dir . -name BlockVerifier -case underscore -output ./mocks/
@@ -199,12 +213,14 @@ func VerifyBlocks(blockBuff []*common.Block, signatureVerifier BlockVerifier) er
 	}
 
 	var config *common.ConfigEnvelope
+	var isLastBlockConfigBlock bool
 	// Verify all configuration blocks that are found inside the block batch,
 	// with the configuration that was committed (nil) or with one that is picked up
 	// during iteration over the block batch.
 	for _, block := range blockBuff {
 		configFromBlock, err := ConfigFromBlock(block)
 		if err == errNotAConfig {
+			isLastBlockConfigBlock = false
 			continue
 		}
 		if err != nil {
@@ -215,10 +231,17 @@ func VerifyBlocks(blockBuff []*common.Block, signatureVerifier BlockVerifier) er
 			return err
 		}
 		config = configFromBlock
+		isLastBlockConfigBlock = true
 	}
 
 	// Verify the last block's signature
 	lastBlock := blockBuff[len(blockBuff)-1]
+
+	// If last block is a config block, we verified it using the policy of the previous block, so it's valid.
+	if isLastBlockConfigBlock {
+		return nil
+	}
+
 	return VerifyBlockSignature(lastBlock, signatureVerifier, config)
 }
 
@@ -345,6 +368,47 @@ func VerifyBlockSignature(block *common.Block, verifier BlockVerifier, config *c
 type EndpointCriteria struct {
 	Endpoint   string   // Endpoint of the form host:port
 	TLSRootCAs [][]byte // PEM encoded TLS root CA certificates
+}
+
+// String returns a string representation of this EndpointCriteria
+func (ep EndpointCriteria) String() string {
+	var formattedCAs []interface{}
+	for _, rawCAFile := range ep.TLSRootCAs {
+		var bl *pem.Block
+		pemContent := rawCAFile
+		for {
+			bl, pemContent = pem.Decode(pemContent)
+			if bl == nil {
+				break
+			}
+			cert, err := x509.ParseCertificate(bl.Bytes)
+			if err != nil {
+				break
+			}
+
+			issuedBy := cert.Issuer.String()
+			if cert.Issuer.String() == cert.Subject.String() {
+				issuedBy = "self"
+			}
+
+			info := make(map[string]interface{})
+			info["Expired"] = time.Now().After(cert.NotAfter)
+			info["Subject"] = cert.Subject.String()
+			info["Issuer"] = issuedBy
+			formattedCAs = append(formattedCAs, info)
+		}
+	}
+
+	formattedEndpointCriteria := make(map[string]interface{})
+	formattedEndpointCriteria["Endpoint"] = ep.Endpoint
+	formattedEndpointCriteria["CAs"] = formattedCAs
+
+	rawJSON, err := json.Marshal(formattedEndpointCriteria)
+	if err != nil {
+		return fmt.Sprintf("{\"Endpoint\": \"%s\"}", ep.Endpoint)
+	}
+
+	return string(rawJSON)
 }
 
 // EndpointconfigFromConfigBlock retrieves TLS CA certificates and endpoints
@@ -537,6 +601,7 @@ func (bva *BlockVerifierAssembler) VerifierFromConfig(configuration *common.Conf
 		Logger:    bva.Logger,
 		PolicyMgr: policyMgr,
 		Channel:   channel,
+		BCCSP:     bva.BCCSP,
 	}, nil
 }
 
@@ -545,6 +610,7 @@ type BlockValidationPolicyVerifier struct {
 	Logger    *flogging.FabricLogger
 	Channel   string
 	PolicyMgr policies.Manager
+	BCCSP     bccsp.BCCSP
 }
 
 // VerifyBlockSignature verifies the signed data associated to a block, optionally with the given config envelope.
@@ -552,7 +618,7 @@ func (bv *BlockValidationPolicyVerifier) VerifyBlockSignature(sd []*protoutil.Si
 	policyMgr := bv.PolicyMgr
 	// If the envelope passed isn't nil, we should use a different policy manager.
 	if envelope != nil {
-		bundle, err := channelconfig.NewBundle(bv.Channel, envelope.Config, factory.GetDefault())
+		bundle, err := channelconfig.NewBundle(bv.Channel, envelope.Config, bv.BCCSP)
 		if err != nil {
 			buff := &bytes.Buffer{}
 			protolator.DeepMarshalJSON(buff, envelope.Config)
@@ -566,7 +632,7 @@ func (bv *BlockValidationPolicyVerifier) VerifyBlockSignature(sd []*protoutil.Si
 	if !exists {
 		return errors.Errorf("policy %s wasn't found", policies.BlockValidation)
 	}
-	return policy.Evaluate(sd)
+	return policy.EvaluateSignedData(sd)
 }
 
 //go:generate mockery -dir . -name BlockRetriever -case underscore -output ./mocks/
@@ -585,9 +651,6 @@ func LastConfigBlock(block *common.Block, blockRetriever BlockRetriever) (*commo
 	}
 	if blockRetriever == nil {
 		return nil, errors.New("nil blockRetriever")
-	}
-	if block.Metadata == nil || len(block.Metadata.Metadata) <= int(common.BlockMetadataIndex_LAST_CONFIG) {
-		return nil, errors.New("no metadata in block")
 	}
 	lastConfigBlockNum, err := protoutil.GetLastConfigIndexFromBlock(block)
 	if err != nil {

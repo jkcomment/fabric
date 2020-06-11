@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	ab "github.com/hyperledger/fabric-protos-go/orderer"
 	"github.com/hyperledger/fabric/core/config/configtest"
 	"github.com/hyperledger/fabric/internal/peer/common"
 	"github.com/hyperledger/fabric/internal/peer/common/mock"
-	cb "github.com/hyperledger/fabric/protos/common"
-	ab "github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -166,20 +166,18 @@ func getMockDeliverService(block *cb.Block) *mock.DeliverService {
 }
 
 func createTestBlock() *cb.Block {
-	lc := &cb.LastConfig{Index: 0}
-	lcBytes := protoutil.MarshalOrPanic(lc)
-	metadata := &cb.Metadata{
-		Value: lcBytes,
-	}
-	metadataBytes := protoutil.MarshalOrPanic(metadata)
-	blockMetadata := make([][]byte, cb.BlockMetadataIndex_LAST_CONFIG+1)
-	blockMetadata[cb.BlockMetadataIndex_LAST_CONFIG] = metadataBytes
+	metadataBytes := protoutil.MarshalOrPanic(&cb.Metadata{
+		Value: protoutil.MarshalOrPanic(&cb.OrdererBlockMetadata{
+			LastConfig: &cb.LastConfig{Index: 0},
+		}),
+	})
+
 	block := &cb.Block{
 		Header: &cb.BlockHeader{
 			Number: 0,
 		},
 		Metadata: &cb.BlockMetadata{
-			Metadata: blockMetadata,
+			Metadata: [][]byte{metadataBytes},
 		},
 	}
 

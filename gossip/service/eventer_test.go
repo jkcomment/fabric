@@ -10,9 +10,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/gossip/util"
-	"github.com/hyperledger/fabric/protos/peer"
 )
 
 const testChannelID = "foo"
@@ -30,9 +30,6 @@ func (mr *mockReceiver) updateAnchors(config Config) {
 	logger.Debugf("[TEST] Setting config to %d %v", config.Sequence(), config.Organizations())
 	mr.orgs = config.Organizations()
 	mr.sequence = config.Sequence()
-}
-
-func (mr *mockReceiver) updateEndpoints(chainID string, endpoints []string) {
 }
 
 type mockConfig mockReceiver

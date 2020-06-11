@@ -29,11 +29,6 @@ const (
 	opened
 )
 
-// Conf configuration for `DB`
-type Conf struct {
-	DBPath string
-}
-
 // DB - a wrapper on an actual store
 type DB struct {
 	conf    *Conf
@@ -80,6 +75,17 @@ func (dbInst *DB) Open() {
 		panic(fmt.Sprintf("Error opening leveldb: %s", err))
 	}
 	dbInst.dbState = opened
+}
+
+// IsEmpty returns whether or not a database is empty
+func (dbInst *DB) IsEmpty() (bool, error) {
+	dbInst.mutex.RLock()
+	defer dbInst.mutex.RUnlock()
+	itr := dbInst.db.NewIterator(&goleveldbutil.Range{}, dbInst.readOpts)
+	defer itr.Release()
+	hasItems := itr.Next()
+	return !hasItems,
+		errors.Wrapf(itr.Error(), "error while trying to see if the leveldb at path [%s] is empty", dbInst.conf.DBPath)
 }
 
 // Close closes the underlying db

@@ -11,16 +11,17 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/configtx/test"
 	"github.com/hyperledger/fabric/common/crypto"
-	mmsp "github.com/hyperledger/fabric/common/mocks/msp"
-	"github.com/hyperledger/fabric/common/util"
-	lutils "github.com/hyperledger/fabric/core/ledger/util"
+	"github.com/hyperledger/fabric/internal/pkg/txflags"
+
+	"github.com/hyperledger/fabric/common/ledger/testutil/fakes"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	"github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -28,13 +29,16 @@ import (
 var signer msp.SigningIdentity
 
 func init() {
-	var err error
 	// setup the MSP manager so that we can sign/verify
-	err = msptesttools.LoadMSPSetupForTesting()
+	var err error = msptesttools.LoadMSPSetupForTesting()
 	if err != nil {
 		panic(fmt.Errorf("Could not load msp config, err %s", err))
 	}
-	signer, err = mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	if err != nil {
+		panic(fmt.Errorf("Initialize cryptoProvider failed: %s", err))
+	}
+	signer, err = mspmgmt.GetLocalMSP(cryptoProvider).GetDefaultSigningIdentity()
 	if err != nil {
 		panic(fmt.Errorf("Could not initialize msp/signer"))
 	}
@@ -61,11 +65,17 @@ type BlockDetails struct {
 	Txs          []*TxDetails
 }
 
+//go:generate counterfeiter -o fakes/signing_identity.go --fake-name SigningIdentity . signingIdentity
+
+type signingIdentity interface {
+	msp.SigningIdentity
+}
+
 // NewBlockGenerator instantiates new BlockGenerator for testing
 func NewBlockGenerator(t *testing.T, ledgerID string, signTxs bool) (*BlockGenerator, *common.Block) {
 	gb, err := test.MakeGenesisBlock(ledgerID)
 	assert.NoError(t, err)
-	gb.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = lutils.NewTxValidationFlagsSetValue(len(gb.Data.Data), pb.TxValidationCode_VALID)
+	gb.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txflags.NewWithValues(len(gb.Data.Data), pb.TxValidationCode_VALID)
 	return &BlockGenerator{1, protoutil.BlockHeaderHash(gb.GetHeader()), signTxs, t}, gb
 }
 
@@ -104,7 +114,7 @@ func (bg *BlockGenerator) NextTestBlocks(numBlocks int) []*common.Block {
 	numTx := 10
 	for i := 0; i < numBlocks; i++ {
 		block := bg.NextTestBlock(numTx, 100)
-		block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = lutils.NewTxValidationFlagsSetValue(numTx, pb.TxValidationCode_VALID)
+		block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txflags.NewWithValues(numTx, pb.TxValidationCode_VALID)
 		blocks = append(blocks, block)
 	}
 	return blocks
@@ -156,7 +166,7 @@ func ConstructTransactionFromTxDetails(txDetails *TxDetails, sign bool) (*common
 	var txID string
 	if sign {
 		txEnv, txID, err = ConstructSignedTxEnvWithDefaultSigner(
-			util.GetTestChainID(),
+			"testchannelid",
 			ccid,
 			nil,
 			txDetails.SimulationResults,
@@ -167,7 +177,7 @@ func ConstructTransactionFromTxDetails(txDetails *TxDetails, sign bool) (*common
 		)
 	} else {
 		txEnv, txID, err = ConstructUnsignedTxEnv(
-			util.GetTestChainID(),
+			"testchannelid",
 			ccid,
 			nil,
 			txDetails.SimulationResults,
@@ -269,7 +279,7 @@ func ConstructTestBlock(t *testing.T, blockNum uint64, numTx int, txSize int) *c
 // The first block in the returned array is a config tx block that represents a genesis block
 // Except the genesis block, the size of each of the block would be the same.
 func ConstructTestBlocks(t *testing.T, numBlocks int) []*common.Block {
-	bg, gb := NewBlockGenerator(t, util.GetTestChainID(), false)
+	bg, gb := NewBlockGenerator(t, "testchannelid", false)
 	blocks := []*common.Block{}
 	if numBlocks != 0 {
 		blocks = append(blocks, gb)
@@ -283,7 +293,7 @@ func ConstructBytesProposalResponsePayload(version string, simulationResults []b
 		Name:    "foo",
 		Version: version,
 	}
-	return constructBytesProposalResponsePayload(util.GetTestChainID(), ccid, nil, simulationResults)
+	return constructBytesProposalResponsePayload("testchannelid", ccid, nil, simulationResults)
 }
 
 func NewBlock(env []*common.Envelope, blockNum uint64, previousHash []byte) *common.Block {
@@ -295,19 +305,19 @@ func NewBlock(env []*common.Envelope, blockNum uint64, previousHash []byte) *com
 	block.Header.DataHash = protoutil.BlockDataHash(block.Data)
 	protoutil.InitBlockMetadata(block)
 
-	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = lutils.NewTxValidationFlagsSetValue(len(env), pb.TxValidationCode_VALID)
+	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txflags.NewWithValues(len(env), pb.TxValidationCode_VALID)
 
 	return block
 }
 
 // constructBytesProposalResponsePayload constructs a ProposalResponsePayload byte for tests with a default signer.
-func constructBytesProposalResponsePayload(chainID string, ccid *pb.ChaincodeID, pResponse *pb.Response, simulationResults []byte) ([]byte, error) {
+func constructBytesProposalResponsePayload(channelID string, ccid *pb.ChaincodeID, pResponse *pb.Response, simulationResults []byte) ([]byte, error) {
 	ss, err := signer.Serialize()
 	if err != nil {
 		return nil, err
 	}
 
-	prop, _, err := protoutil.CreateChaincodeProposal(common.HeaderType_ENDORSER_TRANSACTION, chainID, &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: ccid}}, ss)
+	prop, _, err := protoutil.CreateChaincodeProposal(common.HeaderType_ENDORSER_TRANSACTION, channelID, &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{ChaincodeId: ccid}}, ss)
 	if err != nil {
 		return nil, err
 	}
@@ -357,8 +367,8 @@ func ConstructUnsignedTxEnv(
 	visibility []byte,
 	headerType common.HeaderType,
 ) (*common.Envelope, string, error) {
-	mspLcl := mmsp.NewNoopMsp()
-	sigId, _ := mspLcl.GetDefaultSigningIdentity()
+
+	sigId := &fakes.SigningIdentity{}
 
 	return ConstructSignedTxEnv(
 		chainID,
@@ -375,7 +385,7 @@ func ConstructUnsignedTxEnv(
 
 // ConstructSignedTxEnv constructs a transaction envelop for tests
 func ConstructSignedTxEnv(
-	chainID string,
+	channelID string,
 	ccid *pb.ChaincodeID,
 	pResponse *pb.Response,
 	simulationResults []byte,
@@ -395,7 +405,7 @@ func ConstructSignedTxEnv(
 		// if txid is not set, then we need to generate one while creating the proposal message
 		prop, txid, err = protoutil.CreateChaincodeProposal(
 			common.HeaderType_ENDORSER_TRANSACTION,
-			chainID,
+			channelID,
 			&pb.ChaincodeInvocationSpec{
 				ChaincodeSpec: &pb.ChaincodeSpec{
 					ChaincodeId: ccid,
@@ -406,14 +416,15 @@ func ConstructSignedTxEnv(
 
 	} else {
 		// if txid is set, we should not generate a txid instead reuse the given txid
-		nonce, err := crypto.GetRandomNonce()
+		var nonce []byte
+		nonce, err = crypto.GetRandomNonce()
 		if err != nil {
 			return nil, "", err
 		}
 		prop, txid, err = protoutil.CreateChaincodeProposalWithTxIDNonceAndTransient(
 			txid,
 			headerType,
-			chainID,
+			channelID,
 			&pb.ChaincodeInvocationSpec{
 				ChaincodeSpec: &pb.ChaincodeSpec{
 					ChaincodeId: ccid,

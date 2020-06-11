@@ -10,9 +10,9 @@ import (
 	"math"
 	"testing"
 
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/common/privdata"
 	"github.com/hyperledger/fabric/core/ledger/pvtdatapolicy/mock"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -49,15 +49,16 @@ func TestExpiringBlock(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(math.MaxUint64), expiringBlk)
 
-	expiringBlk, err = btlPolicy.GetExpiringBlock("ns1", "coll4", 50)
+	_, err = btlPolicy.GetExpiringBlock("ns1", "coll4", 50)
+	assert.Error(t, err)
 	_, ok := err.(privdata.NoSuchCollectionError)
 	assert.True(t, ok)
 }
 
 func testutilSampleBTLPolicy() BTLPolicy {
 	ccInfoRetriever := &mock.CollectionInfoProvider{}
-	ccInfoRetriever.CollectionInfoStub = func(ccName, collName string) (*common.StaticCollectionConfig, error) {
-		collConfig := &common.StaticCollectionConfig{}
+	ccInfoRetriever.CollectionInfoStub = func(ccName, collName string) (*peer.StaticCollectionConfig, error) {
+		collConfig := &peer.StaticCollectionConfig{}
 		var err error
 		switch collName {
 		case "coll1":

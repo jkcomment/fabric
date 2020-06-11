@@ -15,9 +15,10 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	lb "github.com/hyperledger/fabric-protos-go/peer/lifecycle"
+	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -43,7 +44,7 @@ type CommittedQueryInput struct {
 // QueryCommittedCmd returns the cobra command for
 // querying a committed chaincode definition given
 // the chaincode name
-func QueryCommittedCmd(c *CommittedQuerier) *cobra.Command {
+func QueryCommittedCmd(c *CommittedQuerier, cryptoProvider bccsp.BCCSP) *cobra.Command {
 	chaincodeQueryCommittedCmd := &cobra.Command{
 		Use:   "querycommitted",
 		Short: "Query the committed chaincode definitions by channel on a peer.",
@@ -60,7 +61,7 @@ func QueryCommittedCmd(c *CommittedQuerier) *cobra.Command {
 					TLSEnabled:            viper.GetBool("peer.tls.enabled"),
 				}
 
-				cc, err := NewClientConnections(ccInput)
+				cc, err := NewClientConnections(ccInput, cryptoProvider)
 				if err != nil {
 					return err
 				}
@@ -174,6 +175,7 @@ func (c *CommittedQuerier) printResponse(proposalResponse *pb.ProposalResponse) 
 	for _, cd := range result.ChaincodeDefinitions {
 		fmt.Fprintf(c.Writer, "Name: %s, ", cd.Name)
 		c.printSingleChaincodeDefinition(cd)
+		fmt.Fprintf(c.Writer, "\n")
 	}
 	return nil
 }

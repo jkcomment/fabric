@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"testing"
 
+	protopeer "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/ledger"
-	protopeer "github.com/hyperledger/fabric/protos/peer"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -205,9 +205,11 @@ func (d *sampleDataHelper) verifyBlockAndPvtdataUsingSubmittedData(h *testhelper
 			h.verifyBlockAndPvtData(uint64(8), nil, func(r *retrievedBlockAndPvtdata) {
 				r.sameBlockHeaderAndData(submittedBlk.Block)
 				r.containsValidationCode(0, protopeer.TxValidationCode_MVCC_READ_CONFLICT)
+				r.containsCommitHash()
 			})
 		}
 	}
+	h.verifyCommitHashExists()
 }
 
 func (d *sampleDataHelper) verifyGetTransactionByIDUsingSubmittedData(h *testhelper) {

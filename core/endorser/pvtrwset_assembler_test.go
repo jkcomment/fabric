@@ -12,26 +12,26 @@ package endorser
 import (
 	"testing"
 
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/ledger/rwset"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestAssemblePvtRWSet(t *testing.T) {
-	collectionsConfigCC1 := &common.CollectionConfigPackage{
-		Config: []*common.CollectionConfig{
+	collectionsConfigCC1 := &peer.CollectionConfigPackage{
+		Config: []*peer.CollectionConfig{
 			{
-				Payload: &common.CollectionConfig_StaticCollectionConfig{
-					StaticCollectionConfig: &common.StaticCollectionConfig{
+				Payload: &peer.CollectionConfig_StaticCollectionConfig{
+					StaticCollectionConfig: &peer.StaticCollectionConfig{
 						Name: "mycollection-1",
 					},
 				},
 			},
 			{
-				Payload: &common.CollectionConfig_StaticCollectionConfig{
-					StaticCollectionConfig: &common.StaticCollectionConfig{
+				Payload: &peer.CollectionConfig_StaticCollectionConfig{
+					StaticCollectionConfig: &peer.StaticCollectionConfig{
 						Name: "mycollection-2",
 					},
 				},
@@ -47,6 +47,7 @@ func TestAssemblePvtRWSet(t *testing.T) {
 		},
 		nil,
 	)
+	mockDeployedCCInfoProvider.AllCollectionsConfigPkgReturns(collectionsConfigCC1, nil)
 
 	privData := &rwset.TxPvtReadWriteSet{
 		DataModel: rwset.TxReadWriteSet_KV,

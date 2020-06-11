@@ -18,16 +18,16 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	mspproto "github.com/hyperledger/fabric-protos-go/msp"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	configtxtest "github.com/hyperledger/fabric/common/configtx/test"
-	"github.com/hyperledger/fabric/core/comm"
-	"github.com/hyperledger/fabric/core/comm/testpb"
 	"github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/hyperledger/fabric/core/peer"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
+	"github.com/hyperledger/fabric/internal/pkg/comm/testpb"
+	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	"github.com/hyperledger/fabric/msp"
-	cb "github.com/hyperledger/fabric/protos/common"
-	mspproto "github.com/hyperledger/fabric/protos/msp"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -89,6 +89,18 @@ func createMSPConfig(rootCerts, tlsRootCerts, tlsIntermediateCerts [][]byte,
 		TlsRootCerts:         tlsRootCerts,
 		TlsIntermediateCerts: tlsIntermediateCerts,
 		Name:                 mspID,
+		FabricNodeOus: &mspproto.FabricNodeOUs{
+			Enable: true,
+			ClientOuIdentifier: &mspproto.FabricOUIdentifier{
+				OrganizationalUnitIdentifier: "client",
+			},
+			PeerOuIdentifier: &mspproto.FabricOUIdentifier{
+				OrganizationalUnitIdentifier: "peer",
+			},
+			AdminOuIdentifier: &mspproto.FabricOUIdentifier{
+				OrganizationalUnitIdentifier: "admin",
+			},
+		},
 	}
 
 	fmpsjs, err := proto.Marshal(fmspconf)
@@ -99,14 +111,14 @@ func createMSPConfig(rootCerts, tlsRootCerts, tlsIntermediateCerts [][]byte,
 	return mspconf, nil
 }
 
-func createConfigBlock(chainID string, appMSPConf, ordererMSPConf *mspproto.MSPConfig,
+func createConfigBlock(channelID string, appMSPConf, ordererMSPConf *mspproto.MSPConfig,
 	appOrgID, ordererOrgID string) (*cb.Block, error) {
-	block, err := configtxtest.MakeGenesisBlockFromMSPs(chainID, appMSPConf, ordererMSPConf, appOrgID, ordererOrgID)
+	block, err := configtxtest.MakeGenesisBlockFromMSPs(channelID, appMSPConf, ordererMSPConf, appOrgID, ordererOrgID)
 	if block == nil || err != nil {
 		return block, err
 	}
 
-	txsFilter := util.NewTxValidationFlagsSetValue(len(block.Data.Data), pb.TxValidationCode_VALID)
+	txsFilter := txflags.NewWithValues(len(block.Data.Data), pb.TxValidationCode_VALID)
 	block.Metadata.Metadata[cb.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsFilter
 
 	return block, nil
@@ -270,7 +282,7 @@ func TestUpdateRootsFromConfigBlock(t *testing.T) {
 				return
 			}
 
-			peerInstance.Server = server
+			peerInstance.SetServer(server)
 			peerInstance.ServerConfig = test.serverConfig
 
 			assert.NoError(t, err, "NewGRPCServer should not have returned an error")

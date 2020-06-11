@@ -9,10 +9,12 @@ package policies_test
 import (
 	"testing"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	mb "github.com/hyperledger/fabric-protos-go/msp"
 	"github.com/hyperledger/fabric/common/cauthdsl"
 	"github.com/hyperledger/fabric/common/policies"
-	cb "github.com/hyperledger/fabric/protos/common"
-	mb "github.com/hyperledger/fabric/protos/msp"
+	"github.com/hyperledger/fabric/common/policydsl"
+	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -27,7 +29,7 @@ func TestImplicitMetaPolicy_Convert(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -45,7 +47,7 @@ func TestImplicitMetaPolicy_Convert(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -74,9 +76,9 @@ func TestImplicitMetaPolicy_Convert(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.SignedBy(0),
-			cauthdsl.SignedBy(1),
+		Rule: policydsl.And(
+			policydsl.SignedBy(0),
+			policydsl.SignedBy(1),
 		),
 		Identities: []*mb.MSPPrincipal{
 			{
@@ -110,11 +112,11 @@ func TestImplicitMetaPolicy_Convert1(t *testing.T) {
 
 	pfs := &cauthdsl.EnvelopeBasedPolicyProvider{}
 
-	p1, err := pfs.NewPolicy(cauthdsl.SignedByAnyMember([]string{"A", "B"}))
+	p1, err := pfs.NewPolicy(policydsl.SignedByAnyMember([]string{"A", "B"}))
 	assert.NotNil(t, p1)
 	assert.NoError(t, err)
 
-	p2, err := pfs.NewPolicy(cauthdsl.SignedByAnyMember([]string{"B"}))
+	p2, err := pfs.NewPolicy(policydsl.SignedByAnyMember([]string{"B"}))
 	assert.NotNil(t, p2)
 	assert.NoError(t, err)
 
@@ -129,13 +131,13 @@ func TestImplicitMetaPolicy_Convert1(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.Or(
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(1),
+		Rule: policydsl.And(
+			policydsl.Or(
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(1),
 			),
-			cauthdsl.NOutOf(1,
-				[]*cb.SignaturePolicy{cauthdsl.SignedBy(1)},
+			policydsl.NOutOf(1,
+				[]*cb.SignaturePolicy{policydsl.SignedBy(1)},
 			),
 		),
 		Identities: []*mb.MSPPrincipal{
@@ -172,17 +174,17 @@ func TestImplicitMetaPolicy_Convert2(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(1,
+		Rule: policydsl.NOutOf(1,
 			[]*cb.SignaturePolicy{
-				cauthdsl.NOutOf(2,
+				policydsl.NOutOf(2,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(0),
-						cauthdsl.SignedBy(1),
+						policydsl.SignedBy(0),
+						policydsl.SignedBy(1),
 					},
 				),
-				cauthdsl.NOutOf(1,
+				policydsl.NOutOf(1,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(2),
+						policydsl.SignedBy(2),
 					},
 				),
 			},
@@ -222,10 +224,10 @@ func TestImplicitMetaPolicy_Convert2(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(2,
+		Rule: policydsl.NOutOf(2,
 			[]*cb.SignaturePolicy{
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(1),
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(1),
 			},
 		),
 		Identities: []*mb.MSPPrincipal{
@@ -263,26 +265,26 @@ func TestImplicitMetaPolicy_Convert2(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.NOutOf(1,
+		Rule: policydsl.And(
+			policydsl.NOutOf(1,
 				[]*cb.SignaturePolicy{
-					cauthdsl.NOutOf(2,
+					policydsl.NOutOf(2,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(0),
-							cauthdsl.SignedBy(1),
+							policydsl.SignedBy(0),
+							policydsl.SignedBy(1),
 						},
 					),
-					cauthdsl.NOutOf(1,
+					policydsl.NOutOf(1,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(2),
+							policydsl.SignedBy(2),
 						},
 					),
 				},
 			),
-			cauthdsl.NOutOf(2,
+			policydsl.NOutOf(2,
 				[]*cb.SignaturePolicy{
-					cauthdsl.SignedBy(3),
-					cauthdsl.SignedBy(0),
+					policydsl.SignedBy(3),
+					policydsl.SignedBy(0),
 				},
 			),
 		),
@@ -338,7 +340,7 @@ func TestImplicitMetaPolicy_Convert3(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -356,7 +358,7 @@ func TestImplicitMetaPolicy_Convert3(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -374,7 +376,7 @@ func TestImplicitMetaPolicy_Convert3(t *testing.T) {
 
 	p3, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -407,12 +409,12 @@ func TestImplicitMetaPolicy_Convert3(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.And(
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(1),
+		Rule: policydsl.And(
+			policydsl.And(
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(1),
 			),
-			cauthdsl.SignedBy(2),
+			policydsl.SignedBy(2),
 		),
 		Identities: []*mb.MSPPrincipal{
 			{
@@ -457,7 +459,7 @@ func TestImplicitMetaPolicy_Convert4(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -475,7 +477,7 @@ func TestImplicitMetaPolicy_Convert4(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -493,7 +495,7 @@ func TestImplicitMetaPolicy_Convert4(t *testing.T) {
 
 	p3, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule:    cauthdsl.SignedBy(0),
+		Rule:    policydsl.SignedBy(0),
 		Identities: []*mb.MSPPrincipal{
 			{
 				PrincipalClassification: mb.MSPPrincipal_ROLE,
@@ -526,12 +528,12 @@ func TestImplicitMetaPolicy_Convert4(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.And(
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(0),
+		Rule: policydsl.And(
+			policydsl.And(
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(0),
 			),
-			cauthdsl.SignedBy(0),
+			policydsl.SignedBy(0),
 		),
 		Identities: []*mb.MSPPrincipal{
 			{
@@ -559,17 +561,17 @@ func TestImplicitMetaPolicy_Convert5(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(1,
+		Rule: policydsl.NOutOf(1,
 			[]*cb.SignaturePolicy{
-				cauthdsl.NOutOf(2,
+				policydsl.NOutOf(2,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(0),
-						cauthdsl.SignedBy(1),
+						policydsl.SignedBy(0),
+						policydsl.SignedBy(1),
 					},
 				),
-				cauthdsl.NOutOf(1,
+				policydsl.NOutOf(1,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(2),
+						policydsl.SignedBy(2),
 					},
 				),
 			},
@@ -609,10 +611,10 @@ func TestImplicitMetaPolicy_Convert5(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(2,
+		Rule: policydsl.NOutOf(2,
 			[]*cb.SignaturePolicy{
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(1),
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(1),
 			},
 		),
 		Identities: []*mb.MSPPrincipal{
@@ -650,26 +652,26 @@ func TestImplicitMetaPolicy_Convert5(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.NOutOf(1,
+		Rule: policydsl.And(
+			policydsl.NOutOf(1,
 				[]*cb.SignaturePolicy{
-					cauthdsl.NOutOf(2,
+					policydsl.NOutOf(2,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(0),
-							cauthdsl.SignedBy(1),
+							policydsl.SignedBy(0),
+							policydsl.SignedBy(1),
 						},
 					),
-					cauthdsl.NOutOf(1,
+					policydsl.NOutOf(1,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(0),
+							policydsl.SignedBy(0),
 						},
 					),
 				},
 			),
-			cauthdsl.NOutOf(2,
+			policydsl.NOutOf(2,
 				[]*cb.SignaturePolicy{
-					cauthdsl.SignedBy(2),
-					cauthdsl.SignedBy(0),
+					policydsl.SignedBy(2),
+					policydsl.SignedBy(0),
 				},
 			),
 		),
@@ -717,17 +719,17 @@ func TestImplicitMetaPolicy_Convert6(t *testing.T) {
 
 	p1, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(1,
+		Rule: policydsl.NOutOf(1,
 			[]*cb.SignaturePolicy{
-				cauthdsl.NOutOf(2,
+				policydsl.NOutOf(2,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(0),
-						cauthdsl.SignedBy(1),
+						policydsl.SignedBy(0),
+						policydsl.SignedBy(1),
 					},
 				),
-				cauthdsl.NOutOf(1,
+				policydsl.NOutOf(1,
 					[]*cb.SignaturePolicy{
-						cauthdsl.SignedBy(2),
+						policydsl.SignedBy(2),
 					},
 				),
 			},
@@ -767,10 +769,10 @@ func TestImplicitMetaPolicy_Convert6(t *testing.T) {
 
 	p2, err := pfs.NewPolicy(&cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.NOutOf(2,
+		Rule: policydsl.NOutOf(2,
 			[]*cb.SignaturePolicy{
-				cauthdsl.SignedBy(0),
-				cauthdsl.SignedBy(1),
+				policydsl.SignedBy(0),
+				policydsl.SignedBy(1),
 			},
 		),
 		Identities: []*mb.MSPPrincipal{
@@ -808,26 +810,26 @@ func TestImplicitMetaPolicy_Convert6(t *testing.T) {
 	assert.NotNil(t, spe)
 	assert.Equal(t, &cb.SignaturePolicyEnvelope{
 		Version: 0,
-		Rule: cauthdsl.And(
-			cauthdsl.NOutOf(1,
+		Rule: policydsl.And(
+			policydsl.NOutOf(1,
 				[]*cb.SignaturePolicy{
-					cauthdsl.NOutOf(2,
+					policydsl.NOutOf(2,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(0),
-							cauthdsl.SignedBy(1),
+							policydsl.SignedBy(0),
+							policydsl.SignedBy(1),
 						},
 					),
-					cauthdsl.NOutOf(1,
+					policydsl.NOutOf(1,
 						[]*cb.SignaturePolicy{
-							cauthdsl.SignedBy(0),
+							policydsl.SignedBy(0),
 						},
 					),
 				},
 			),
-			cauthdsl.NOutOf(2,
+			policydsl.NOutOf(2,
 				[]*cb.SignaturePolicy{
-					cauthdsl.SignedBy(0),
-					cauthdsl.SignedBy(0),
+					policydsl.SignedBy(0),
+					policydsl.SignedBy(0),
 				},
 			),
 		),
@@ -856,7 +858,11 @@ func TestImplicitMetaPolicy_Convert6(t *testing.T) {
 
 type inconvertiblePolicy struct{}
 
-func (i *inconvertiblePolicy) Evaluate(signatureSet []*protoutil.SignedData) error {
+func (i *inconvertiblePolicy) EvaluateSignedData(signatureSet []*protoutil.SignedData) error {
+	return nil
+}
+
+func (i *inconvertiblePolicy) EvaluateIdentities(signatureSet []msp.Identity) error {
 	return nil
 }
 
@@ -878,7 +884,11 @@ func TestImplicitMetaPolicy_Convert7(t *testing.T) {
 
 type convertFailurePolicy struct{}
 
-func (i *convertFailurePolicy) Evaluate(signatureSet []*protoutil.SignedData) error {
+func (i *convertFailurePolicy) EvaluateSignedData(signatureSet []*protoutil.SignedData) error {
+	return nil
+}
+
+func (i *convertFailurePolicy) EvaluateIdentities(identities []msp.Identity) error {
 	return nil
 }
 

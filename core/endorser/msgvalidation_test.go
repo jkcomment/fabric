@@ -12,11 +12,11 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	mspproto "github.com/hyperledger/fabric-protos-go/msp"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/endorser"
 	"github.com/hyperledger/fabric/core/endorser/fake"
-	cb "github.com/hyperledger/fabric/protos/common"
-	mspproto "github.com/hyperledger/fabric/protos/msp"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 
 	"github.com/golang/protobuf/proto"
@@ -229,6 +229,19 @@ var _ = Describe("UnpackProposal", func() {
 		})
 	})
 
+	Context("when the chaincode proposal payload is invalid", func() {
+		BeforeEach(func() {
+			marshalChaincodeProposalPayload = func() []byte {
+				return []byte("garbage")
+			}
+		})
+
+		It("wraps and returns an error", func() {
+			_, err := endorser.UnpackProposal(signedProposal)
+			Expect(err).To(MatchError("error unmarshaling ChaincodeProposalPayload: proto: can't skip unknown wire type 7"))
+		})
+	})
+
 	Context("when the chaincode id is empty", func() {
 		BeforeEach(func() {
 			chaincodeHeaderExtension.ChaincodeId = nil
@@ -261,6 +274,17 @@ var _ = Describe("UnpackProposal", func() {
 		It("wraps and returns an error", func() {
 			_, err := endorser.UnpackProposal(signedProposal)
 			Expect(err).To(MatchError("error unmarshaling ChaincodeInvocationSpec: proto: can't skip unknown wire type 7"))
+		})
+	})
+
+	Context("when the chaincode invocation spec is has a nil chaincodespec", func() {
+		BeforeEach(func() {
+			chaincodeInvocationSpec.ChaincodeSpec = nil
+		})
+
+		It("wraps and returns an error", func() {
+			_, err := endorser.UnpackProposal(signedProposal)
+			Expect(err).To(MatchError("chaincode invocation spec did not contain chaincode spec"))
 		})
 	})
 
@@ -386,6 +410,17 @@ var _ = Describe("Validate", func() {
 		It("returns an error", func() {
 			err := up.Validate(fakeIdentityDeserializer)
 			Expect(err).To(MatchError("creator is empty"))
+		})
+	})
+
+	Context("when the epoch is nonzero", func() {
+		BeforeEach(func() {
+			up.ChannelHeader.Epoch = 7
+		})
+
+		It("returns an error", func() {
+			err := up.Validate(fakeIdentityDeserializer)
+			Expect(err).To(MatchError("epoch is non-zero"))
 		})
 	})
 

@@ -16,16 +16,16 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/discovery"
+	"github.com/hyperledger/fabric-protos-go/msp"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/configtx/test"
 	"github.com/hyperledger/fabric/discovery/support/config"
 	"github.com/hyperledger/fabric/discovery/support/mocks"
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/discovery"
-	"github.com/hyperledger/fabric/protos/msp"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/onsi/gomega/gexec"
 	"github.com/stretchr/testify/assert"
@@ -74,7 +74,7 @@ func TestMSPIDMapping(t *testing.T) {
 	assert.NoError(t, err)
 	defer os.Remove(cryptogen)
 
-	idemixgen, err := gexec.Build("github.com/hyperledger/fabric/common/tools/idemixgen")
+	idemixgen, err := gexec.Build("github.com/hyperledger/fabric/cmd/idemixgen")
 	assert.NoError(t, err)
 	defer os.Remove(idemixgen)
 
@@ -116,6 +116,7 @@ func TestMSPIDMapping(t *testing.T) {
 
 	cs := config.NewDiscoverySupport(fakeBlockGetter)
 	res, err := cs.Config("mychannel")
+	assert.NoError(t, err)
 
 	actualKeys := make(map[string]struct{})
 	for key := range res.Orderers {

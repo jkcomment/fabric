@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
-	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/gossip/api"
 	gcomm "github.com/hyperledger/fabric/gossip/comm"
 	"github.com/hyperledger/fabric/gossip/common"
@@ -25,7 +26,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
-	proto "github.com/hyperledger/fabric/protos/gossip"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -76,7 +77,7 @@ func (*configurableCryptoService) GetPKIidOfCert(peerIdentity api.PeerIdentityTy
 
 // VerifyBlock returns nil if the block is properly signed,
 // else returns error
-func (*configurableCryptoService) VerifyBlock(channelID common.ChannelID, seqNum uint64, signedBlock []byte) error {
+func (*configurableCryptoService) VerifyBlock(channelID common.ChannelID, seqNum uint64, signedBlock *cb.Block) error {
 	return nil
 }
 
@@ -138,11 +139,10 @@ func newGossipInstanceWithGRPCWithExternalEndpoint(id int, port int, gRPCServer 
 	go func() {
 		gRPCServer.Start()
 	}()
-	return &gossipGRPC{GossipImpl: g, grpc: gRPCServer}
+	return &gossipGRPC{Node: g, grpc: gRPCServer}
 }
 
 func TestMultipleOrgEndpointLeakage(t *testing.T) {
-	t.Parallel()
 	// Scenario: create 2 organizations, each with 5 peers.
 	// Both organizations will have an anchor peer each
 	// The first 2 peers of each org would have an external endpoint, the rest won't.
@@ -232,7 +232,7 @@ func TestMultipleOrgEndpointLeakage(t *testing.T) {
 
 	membershipCheck := func() bool {
 		for _, p := range peers {
-			peerNetMember := p.GossipImpl.selfNetworkMember()
+			peerNetMember := p.Node.selfNetworkMember()
 			pkiID := peerNetMember.PKIid
 			peersKnown := p.Peers()
 			peersToKnow := expectedMembershipSize[string(pkiID)]
@@ -270,7 +270,6 @@ func TestMultipleOrgEndpointLeakage(t *testing.T) {
 }
 
 func TestConfidentiality(t *testing.T) {
-	t.Parallel()
 	// Scenario: create 4 organizations: {A, B, C, D}, each with 3 peers.
 	// Make only the first 2 peers have an external endpoint.
 	// Also, add the peers to the following channels:
@@ -390,7 +389,7 @@ func TestConfidentiality(t *testing.T) {
 	for _, p := range peers {
 		wg.Add(1)
 		_, msgs := p.Accept(msgSelector, true)
-		peerNetMember := p.GossipImpl.selfNetworkMember()
+		peerNetMember := p.Node.selfNetworkMember()
 		targetORg := string(cs.OrgByPeerIdentity(api.PeerIdentityType(peerNetMember.InternalEndpoint)))
 		go func(targetOrg string, msgs <-chan protoext.ReceivedMessage) {
 			defer wg.Done()
@@ -446,7 +445,7 @@ func TestConfidentiality(t *testing.T) {
 			for i, p := range orgs2Peers[org] {
 				members := p.Peers()
 				expMemberSize := expectedMembershipSize(peersInOrg, externalEndpointsInOrg, org, i < externalEndpointsInOrg)
-				peerNetMember := p.GossipImpl.selfNetworkMember()
+				peerNetMember := p.Node.selfNetworkMember()
 				membersCount := len(members)
 				if membersCount < expMemberSize {
 					return false

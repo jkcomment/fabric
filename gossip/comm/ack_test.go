@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
-	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -61,8 +61,6 @@ func TestInterceptAcks(t *testing.T) {
 }
 
 func TestAck(t *testing.T) {
-	t.Parallel()
-
 	comm1, _ := newCommInstance(t, naiveSec)
 	comm2, port2 := newCommInstance(t, naiveSec)
 	defer comm2.Stop()

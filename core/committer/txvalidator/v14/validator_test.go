@@ -15,15 +15,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/common/cauthdsl"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
+	mb "github.com/hyperledger/fabric-protos-go/msp"
+	"github.com/hyperledger/fabric-protos-go/peer"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	ctxt "github.com/hyperledger/fabric/common/configtx/test"
 	commonerrors "github.com/hyperledger/fabric/common/errors"
 	ledger2 "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/common/ledger/testutil"
-	mockconfig "github.com/hyperledger/fabric/common/mocks/config"
+	"github.com/hyperledger/fabric/common/policydsl"
 	"github.com/hyperledger/fabric/common/semaphore"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/committer/txvalidator"
+	tmocks "github.com/hyperledger/fabric/core/committer/txvalidator/mocks"
 	vp "github.com/hyperledger/fabric/core/committer/txvalidator/plugin"
 	txvalidatorv14 "github.com/hyperledger/fabric/core/committer/txvalidator/v14"
 	"github.com/hyperledger/fabric/core/committer/txvalidator/v14/mocks"
@@ -35,41 +42,56 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt/ledgermgmttest"
-	lutils "github.com/hyperledger/fabric/core/ledger/util"
 	mocktxvalidator "github.com/hyperledger/fabric/core/mocks/txvalidator"
 	mocks2 "github.com/hyperledger/fabric/discovery/support/mocks"
+	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/ledger/rwset"
-	"github.com/hyperledger/fabric/protos/ledger/rwset/kvrwset"
-	mb "github.com/hyperledger/fabric/protos/msp"
-	"github.com/hyperledger/fabric/protos/peer"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func signedByAnyMember(ids []string) []byte {
-	p := cauthdsl.SignedByAnyMember(ids)
+	p := policydsl.SignedByAnyMember(ids)
 	return protoutil.MarshalOrPanic(p)
 }
 
-func preV12Capabilities() *mockconfig.MockApplicationCapabilities {
-	return &mockconfig.MockApplicationCapabilities{}
+func preV12Capabilities() *tmocks.ApplicationCapabilities {
+	ac := &tmocks.ApplicationCapabilities{}
+	ac.On("V1_2Validation").Return(false)
+	ac.On("V1_3Validation").Return(false)
+	ac.On("V2_0Validation").Return(false)
+	ac.On("PrivateChannelData").Return(false)
+	ac.On("ForbidDuplicateTXIdInBlock").Return(false)
+	ac.On("KeyLevelEndorsement").Return(false)
+	return ac
 }
 
-func v12Capabilities() *mockconfig.MockApplicationCapabilities {
-	return &mockconfig.MockApplicationCapabilities{V1_2ValidationRv: true, PrivateChannelDataRv: true}
+func v12Capabilities() *tmocks.ApplicationCapabilities {
+	ac := &tmocks.ApplicationCapabilities{}
+	ac.On("V1_2Validation").Return(true)
+	ac.On("V1_3Validation").Return(false)
+	ac.On("V2_0Validation").Return(false)
+	ac.On("PrivateChannelData").Return(true)
+	ac.On("ForbidDuplicateTXIdInBlock").Return(false)
+	ac.On("KeyLevelEndorsement").Return(false)
+	return ac
 }
 
-func v13Capabilities() *mockconfig.MockApplicationCapabilities {
-	return &mockconfig.MockApplicationCapabilities{V1_2ValidationRv: true, PrivateChannelDataRv: true, V1_3ValidationRv: true, KeyLevelEndorsementRv: true}
+func v13Capabilities() *tmocks.ApplicationCapabilities {
+	ac := &tmocks.ApplicationCapabilities{}
+	ac.On("V1_2Validation").Return(true)
+	ac.On("V1_3Validation").Return(true)
+	ac.On("V2_0Validation").Return(false)
+	ac.On("PrivateChannelData").Return(true)
+	ac.On("ForbidDuplicateTXIdInBlock").Return(true)
+	ac.On("KeyLevelEndorsement").Return(true)
+	return ac
 }
 
-func setupLedgerAndValidatorExplicit(t *testing.T, cpb *mockconfig.MockApplicationCapabilities, plugin validation.Plugin) (ledger.PeerLedger, txvalidator.Validator, func()) {
+func setupLedgerAndValidatorExplicit(t *testing.T, cpb *tmocks.ApplicationCapabilities, plugin validation.Plugin) (ledger.PeerLedger, txvalidator.Validator, func()) {
 	return setupLedgerAndValidatorExplicitWithMSP(t, cpb, plugin, nil)
 }
 
@@ -85,7 +107,7 @@ func setupLedgerAndValidatorWithV13Capabilities(t *testing.T) (ledger.PeerLedger
 	return setupLedgerAndValidatorWithCapabilities(t, v13Capabilities())
 }
 
-func setupLedgerAndValidatorWithCapabilities(t *testing.T, c *mockconfig.MockApplicationCapabilities) (ledger.PeerLedger, txvalidator.Validator, func()) {
+func setupLedgerAndValidatorWithCapabilities(t *testing.T, c *tmocks.ApplicationCapabilities) (ledger.PeerLedger, txvalidator.Validator, func()) {
 	mspmgr := &mocks2.MSPManager{}
 	idThatSatisfiesPrincipal := &mocks2.Identity{}
 	idThatSatisfiesPrincipal.SatisfiesPrincipalReturns(nil)
@@ -95,7 +117,7 @@ func setupLedgerAndValidatorWithCapabilities(t *testing.T, c *mockconfig.MockApp
 	return setupLedgerAndValidatorExplicitWithMSP(t, c, &builtin.DefaultValidation{}, mspmgr)
 }
 
-func setupLedgerAndValidatorExplicitWithMSP(t *testing.T, cpb *mockconfig.MockApplicationCapabilities, plugin validation.Plugin, mspMgr msp.MSPManager) (ledger.PeerLedger, txvalidator.Validator, func()) {
+func setupLedgerAndValidatorExplicitWithMSP(t *testing.T, cpb *tmocks.ApplicationCapabilities, plugin validation.Plugin, mspMgr msp.MSPManager) (ledger.PeerLedger, txvalidator.Validator, func()) {
 	ledgerMgr, cleanup := constructLedgerMgrWithTestDefaults(t, "txvalidator")
 	gb, err := ctxt.MakeGenesisBlock("TestLedger")
 	assert.NoError(t, err)
@@ -106,11 +128,14 @@ func setupLedgerAndValidatorExplicitWithMSP(t *testing.T, cpb *mockconfig.MockAp
 	pm.On("FactoryByName", vp.Name("vscc")).Return(factory)
 	factory.On("New").Return(plugin)
 
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	theValidator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
 		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: cpb, MSPManagerVal: mspMgr},
 		pm,
+		cryptoProvider,
 	)
 
 	return theLedger,
@@ -129,6 +154,7 @@ func createRWset(t *testing.T, ccnames ...string) []byte {
 	rwset, err := rwsetBuilder.GetTxSimulationResults()
 	assert.NoError(t, err)
 	rwsetBytes, err := rwset.GetPubSimulationBytes()
+	assert.NoError(t, err)
 	return rwsetBytes
 }
 
@@ -139,7 +165,7 @@ func getProposalWithType(ccID string, pType common.HeaderType) (*peer.Proposal, 
 			Input:       &peer.ChaincodeInput{Args: [][]byte{[]byte("func")}},
 			Type:        peer.ChaincodeSpec_GOLANG}}
 
-	proposal, _, err := protoutil.CreateProposalFromCIS(pType, util.GetTestChainID(), cis, signerSerialized)
+	proposal, _, err := protoutil.CreateProposalFromCIS(pType, "testchannelid", cis, signerSerialized)
 	return proposal, err
 }
 
@@ -248,13 +274,13 @@ func putCCInfo(theLedger ledger.PeerLedger, ccname string, policy []byte, t *tes
 }
 
 func assertInvalid(block *common.Block, t *testing.T, code peer.TxValidationCode) {
-	txsFilter := lutils.TxValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	txsFilter := txflags.ValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 	assert.True(t, txsFilter.IsInvalid(0))
 	assert.True(t, txsFilter.IsSetTo(0, code))
 }
 
 func assertValid(block *common.Block, t *testing.T) {
-	txsFilter := lutils.TxValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	txsFilter := txflags.ValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 	assert.False(t, txsFilter.IsInvalid(0))
 }
 
@@ -604,13 +630,17 @@ func TestParallelValidation(t *testing.T) {
 	mgr.Setup([]msp.MSP{msp1, msp2})
 
 	vpKey := pb.MetaDataKeys_VALIDATION_PARAMETER.String()
-
-	l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, &mockconfig.MockApplicationCapabilities{V1_2ValidationRv: true, V1_3ValidationRv: true}, &builtin.DefaultValidation{}, mgr)
+	l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(
+		t,
+		v13Capabilities(),
+		&builtin.DefaultValidation{},
+		mgr,
+	)
 	defer cleanup()
 
 	ccID := "mycc"
 
-	policy := cauthdsl.SignedByMspPeer("Org1")
+	policy := policydsl.SignedByMspPeer("Org1")
 	polBytes := protoutil.MarshalOrPanic(policy)
 	putCCInfo(l, ccID, polBytes, t)
 
@@ -688,6 +718,7 @@ func TestParallelValidation(t *testing.T) {
 		rwset, err := rwsetBuilder.GetTxSimulationResults()
 		assert.NoError(t, err)
 		rwsetBytes, err := rwset.GetPubSimulationBytes()
+		assert.NoError(t, err)
 		tx := getEnvWithSigner(ccID, nil, rwsetBytes, sig, t)
 		blockData = append(blockData, protoutil.MarshalOrPanic(tx))
 	}
@@ -700,7 +731,7 @@ func TestParallelValidation(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Block metadata array position to store serialized bit array filter of invalid transactions
-	txsFilter := lutils.TxValidationFlags(b.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	txsFilter := txflags.ValidationFlags(b.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 	// tx validity
 	for txNum := 0; txNum < txCnt; txNum += 1 {
 		switch uint(txNum / 10) {
@@ -905,14 +936,14 @@ func TestInvokeOKMetaUpdateOnly(t *testing.T) {
 	mspmgr.DeserializeIdentityReturns(idThatSatisfiesPrincipal, nil)
 
 	t.Run("V1.2", func(t *testing.T) {
-		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, &mockconfig.MockApplicationCapabilities{V1_2ValidationRv: true, PrivateChannelDataRv: true}, &builtin.DefaultValidation{}, mspmgr)
+		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, v12Capabilities(), &builtin.DefaultValidation{}, mspmgr)
 		defer cleanup()
 
 		testInvokeOKMetaUpdateOnly(t, l, v)
 	})
 
 	t.Run("V1.3", func(t *testing.T) {
-		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, &mockconfig.MockApplicationCapabilities{V1_3ValidationRv: true, V1_2ValidationRv: true, PrivateChannelDataRv: true}, &builtin.DefaultValidation{}, mspmgr)
+		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, v13Capabilities(), &builtin.DefaultValidation{}, mspmgr)
 		defer cleanup()
 
 		testInvokeOKMetaUpdateOnly(t, l, v)
@@ -947,14 +978,14 @@ func TestInvokeOKPvtMetaUpdateOnly(t *testing.T) {
 	mspmgr.DeserializeIdentityReturns(idThatSatisfiesPrincipal, nil)
 
 	t.Run("V1.2", func(t *testing.T) {
-		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, &mockconfig.MockApplicationCapabilities{V1_2ValidationRv: true, PrivateChannelDataRv: true}, &builtin.DefaultValidation{}, mspmgr)
+		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, v12Capabilities(), &builtin.DefaultValidation{}, mspmgr)
 		defer cleanup()
 
 		testInvokeOKPvtMetaUpdateOnly(t, l, v)
 	})
 
 	t.Run("V1.3", func(t *testing.T) {
-		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, &mockconfig.MockApplicationCapabilities{V1_3ValidationRv: true, V1_2ValidationRv: true, PrivateChannelDataRv: true}, &builtin.DefaultValidation{}, mspmgr)
+		l, v, cleanup := setupLedgerAndValidatorExplicitWithMSP(t, v13Capabilities(), &builtin.DefaultValidation{}, mspmgr)
 		defer cleanup()
 
 		testInvokeOKPvtMetaUpdateOnly(t, l, v)
@@ -1008,13 +1039,13 @@ func testInvokeOKSCC(t *testing.T, l ledger.PeerLedger, v txvalidator.Validator)
 	cis := &peer.ChaincodeInvocationSpec{
 		ChaincodeSpec: &peer.ChaincodeSpec{
 			ChaincodeId: &peer.ChaincodeID{Name: "lscc", Version: ccVersion},
-			Input:       &peer.ChaincodeInput{Args: [][]byte{[]byte("deploy"), []byte(util.GetTestChainID()), cds}},
+			Input:       &peer.ChaincodeInput{Args: [][]byte{[]byte("deploy"), []byte("testchannelid"), cds}},
 			Type:        peer.ChaincodeSpec_GOLANG}}
 
-	prop, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, signerSerialized)
+	prop, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, "testchannelid", cis, signerSerialized)
 	assert.NoError(t, err)
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
-	rwsetBuilder.AddToWriteSet("lscc", "cc", protoutil.MarshalOrPanic(&ccp.ChaincodeData{Name: "cc", Version: "ver", InstantiationPolicy: cauthdsl.MarshaledAcceptAllPolicy}))
+	rwsetBuilder.AddToWriteSet("lscc", "cc", protoutil.MarshalOrPanic(&ccp.ChaincodeData{Name: "cc", Version: "ver", InstantiationPolicy: policydsl.MarshaledAcceptAllPolicy}))
 	rwset, err := rwsetBuilder.GetTxSimulationResults()
 	assert.NoError(t, err)
 	rwsetBytes, err := rwset.GetPubSimulationBytes()
@@ -1377,7 +1408,7 @@ func validateTxWithStateBasedEndorsement(t *testing.T, l ledger.PeerLedger, v tx
 	ccID := "mycc"
 
 	putCCInfoWithVSCCAndVer(l, ccID, "vscc", ccVersion, signedByAnyMember([]string{"SampleOrg"}), t)
-	putSBEP(l, ccID, "key", cauthdsl.MarshaledRejectAllPolicy, t)
+	putSBEP(l, ccID, "key", policydsl.MarshaledRejectAllPolicy, t)
 
 	tx := getEnv(ccID, nil, createRWset(t, ccID), t)
 	b := &common.Block{Data: &common.BlockData{Data: [][]byte{protoutil.MarshalOrPanic(tx)}}, Header: &common.BlockHeader{Number: 3}}
@@ -1488,7 +1519,7 @@ func (m *mockLedger) GetConfigHistoryRetriever() (ledger.ConfigHistoryRetriever,
 	return args.Get(0).(ledger.ConfigHistoryRetriever), nil
 }
 
-func (m *mockLedger) CommitPvtDataOfOldBlocks(blockPvtData []*ledger.BlockPvtData) ([]*ledger.PvtdataHashMismatch, error) {
+func (m *mockLedger) CommitPvtDataOfOldBlocks(reconciledPvtdata []*ledger.ReconciledPvtdata) ([]*ledger.PvtdataHashMismatch, error) {
 	return nil, nil
 }
 
@@ -1523,8 +1554,8 @@ func (exec *mockQueryExecutor) GetStateRangeScanIterator(namespace string, start
 	return args.Get(0).(ledger2.ResultsIterator), args.Error(1)
 }
 
-func (exec *mockQueryExecutor) GetStateRangeScanIteratorWithMetadata(namespace, startKey, endKey string, metadata map[string]interface{}) (ledger.QueryResultsIterator, error) {
-	args := exec.Called(namespace, startKey, endKey, metadata)
+func (exec *mockQueryExecutor) GetStateRangeScanIteratorWithPagination(namespace, startKey, endKey string, pageSize int32) (ledger.QueryResultsIterator, error) {
+	args := exec.Called(namespace, startKey, endKey, pageSize)
 	return args.Get(0).(ledger.QueryResultsIterator), args.Error(1)
 }
 
@@ -1533,8 +1564,8 @@ func (exec *mockQueryExecutor) ExecuteQuery(namespace, query string) (ledger2.Re
 	return args.Get(0).(ledger2.ResultsIterator), args.Error(1)
 }
 
-func (exec *mockQueryExecutor) ExecuteQueryWithMetadata(namespace, query string, metadata map[string]interface{}) (ledger.QueryResultsIterator, error) {
-	args := exec.Called(namespace, query, metadata)
+func (exec *mockQueryExecutor) ExecuteQueryWithPagination(namespace, query, bookmark string, pageSize int32) (ledger.QueryResultsIterator, error) {
+	args := exec.Called(namespace, query, bookmark, pageSize)
 	return args.Get(0).(ledger.QueryResultsIterator), args.Error(1)
 }
 
@@ -1593,7 +1624,7 @@ func createCustomSupportAndLedger(t *testing.T) (*mocktxvalidator.Support, ledge
 	})
 	mspManager := &mocks2.MSPManager{}
 	mspManager.DeserializeIdentityReturns(identity, nil)
-	support := &mocktxvalidator.Support{LedgerVal: l, ACVal: &mockconfig.MockApplicationCapabilities{}, MSPManagerVal: mspManager}
+	support := &mocktxvalidator.Support{LedgerVal: l, ACVal: preV12Capabilities(), MSPManagerVal: mspManager}
 	return support, l, cleanup
 }
 
@@ -1606,7 +1637,9 @@ func TestDynamicCapabilitiesAndMSP(t *testing.T) {
 	support, l, cleanup := createCustomSupportAndLedger(t)
 	defer cleanup()
 
-	v := txvalidatorv14.NewTxValidator("", semaphore.New(10), support, pm)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	v := txvalidatorv14.NewTxValidator("", semaphore.New(10), support, pm, cryptoProvider)
 
 	ccID := "mycc"
 
@@ -1619,7 +1652,7 @@ func TestDynamicCapabilitiesAndMSP(t *testing.T) {
 	}
 
 	// Perform a validation of a block
-	err := v.Validate(b)
+	err = v.Validate(b)
 	assert.NoError(t, err)
 	assertValid(b, t)
 	// Record the number of times the capabilities and the MSP Manager were invoked
@@ -1649,11 +1682,14 @@ func TestDynamicCapabilitiesAndMSP(t *testing.T) {
 func TestLedgerIsNoAvailable(t *testing.T) {
 	theLedger := new(mockLedger)
 	pm := &mocks.Mapper{}
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	validator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
-		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: &mockconfig.MockApplicationCapabilities{}},
+		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: preV12Capabilities()},
 		pm,
+		cryptoProvider,
 	)
 
 	ccID := "mycc"
@@ -1670,7 +1706,7 @@ func TestLedgerIsNoAvailable(t *testing.T) {
 		Header: &common.BlockHeader{},
 	}
 
-	err := validator.Validate(b)
+	err = validator.Validate(b)
 
 	assertion := assert.New(t)
 	// We suppose to get the error which indicates we cannot commit the block
@@ -1682,11 +1718,14 @@ func TestLedgerIsNoAvailable(t *testing.T) {
 func TestLedgerIsNotAvailableForCheckingTxidDuplicate(t *testing.T) {
 	theLedger := new(mockLedger)
 	pm := &mocks.Mapper{}
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	validator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
-		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: &mockconfig.MockApplicationCapabilities{}},
+		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: preV12Capabilities()},
 		pm,
+		cryptoProvider,
 	)
 
 	ccID := "mycc"
@@ -1699,7 +1738,7 @@ func TestLedgerIsNotAvailableForCheckingTxidDuplicate(t *testing.T) {
 		Header: &common.BlockHeader{},
 	}
 
-	err := validator.Validate(b)
+	err = validator.Validate(b)
 
 	assertion := assert.New(t)
 	// We expect a validation error because the ledger wasn't ready to tell us whether there was a tx with that ID or not
@@ -1709,11 +1748,14 @@ func TestLedgerIsNotAvailableForCheckingTxidDuplicate(t *testing.T) {
 func TestDuplicateTxId(t *testing.T) {
 	theLedger := new(mockLedger)
 	pm := &mocks.Mapper{}
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	validator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
-		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: &mockconfig.MockApplicationCapabilities{}},
+		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: preV12Capabilities()},
 		pm,
+		cryptoProvider,
 	)
 
 	ccID := "mycc"
@@ -1726,14 +1768,14 @@ func TestDuplicateTxId(t *testing.T) {
 		Header: &common.BlockHeader{},
 	}
 
-	err := validator.Validate(b)
+	err = validator.Validate(b)
 
 	assertion := assert.New(t)
 	// We expect no validation error because we simply mark the tx as invalid
 	assertion.NoError(err)
 
 	// We expect the tx to be invalid because of a duplicate txid
-	txsfltr := lutils.TxValidationFlags(b.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	txsfltr := txflags.ValidationFlags(b.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 	assertion.True(txsfltr.IsInvalid(0))
 	assertion.True(txsfltr.Flag(0) == peer.TxValidationCode_DUPLICATE_TXID)
 }
@@ -1747,11 +1789,14 @@ func TestValidationInvalidEndorsing(t *testing.T) {
 	plugin.On("Init", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	plugin.On("Validate", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(errors.New("invalid tx"))
 	pm.On("FactoryByName", vp.Name("vscc")).Return(factory)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	validator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
-		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: &mockconfig.MockApplicationCapabilities{}},
+		&mocktxvalidator.Support{LedgerVal: theLedger, ACVal: preV12Capabilities()},
 		pm,
+		cryptoProvider,
 	)
 
 	ccID := "mycc"
@@ -1778,7 +1823,7 @@ func TestValidationInvalidEndorsing(t *testing.T) {
 	}
 
 	// Keep default callback
-	err := validator.Validate(b)
+	err = validator.Validate(b)
 	// Restore default callback
 	assert.NoError(t, err)
 	assertInvalid(b, t, peer.TxValidationCode_ENDORSEMENT_POLICY_FAILURE)
@@ -1805,7 +1850,7 @@ func TestValidationPluginExecutionError(t *testing.T) {
 	plugin := &mocks.Plugin{}
 	plugin.On("Init", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	l, v, cleanup := setupLedgerAndValidatorExplicit(t, &mockconfig.MockApplicationCapabilities{}, plugin)
+	l, v, cleanup := setupLedgerAndValidatorExplicit(t, preV12Capabilities(), plugin)
 	defer cleanup()
 
 	ccID := "mycc"
@@ -1838,13 +1883,16 @@ func TestValidationPluginNotFound(t *testing.T) {
 
 	pm := &mocks.Mapper{}
 	pm.On("FactoryByName", vp.Name("vscc")).Return(nil)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	validator := txvalidatorv14.NewTxValidator(
 		"",
 		semaphore.New(10),
-		&mocktxvalidator.Support{LedgerVal: l, ACVal: &mockconfig.MockApplicationCapabilities{}},
+		&mocktxvalidator.Support{LedgerVal: l, ACVal: preV12Capabilities()},
 		pm,
+		cryptoProvider,
 	)
-	err := validator.Validate(b)
+	err = validator.Validate(b)
 	executionErr := err.(*commonerrors.VSCCExecutionFailureError)
 	assert.Contains(t, executionErr.Error(), "plugin with name vscc wasn't found")
 }
@@ -1857,7 +1905,14 @@ func TestMain(m *testing.M) {
 	msptesttools.LoadMSPSetupForTesting()
 
 	var err error
-	signer, err = mgmt.GetLocalMSP().GetDefaultSigningIdentity()
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	if err != nil {
+		fmt.Printf("Initialize cryptoProvider bccsp failed: %s", err)
+		os.Exit(-1)
+		return
+	}
+
+	signer, err = mgmt.GetLocalMSP(cryptoProvider).GetDefaultSigningIdentity()
 	if err != nil {
 		fmt.Println("Could not get signer")
 		os.Exit(-1)
@@ -1874,16 +1929,13 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func ToHex(q uint64) string {
-	return "0x" + strconv.FormatUint(q, 16)
-}
-
 func constructLedgerMgrWithTestDefaults(t *testing.T, testDir string) (*ledgermgmt.LedgerMgr, func()) {
 	testDir, err := ioutil.TempDir("", testDir)
 	if err != nil {
 		t.Fatalf("Failed to create ledger directory: %s", err)
 	}
-	ledgerMgr := ledgermgmt.NewLedgerMgr(ledgermgmttest.NewInitializer(testDir))
+	initializer := ledgermgmttest.NewInitializer(testDir)
+	ledgerMgr := ledgermgmt.NewLedgerMgr(initializer)
 	cleanup := func() {
 		ledgerMgr.Close()
 		os.RemoveAll(testDir)

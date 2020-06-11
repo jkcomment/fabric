@@ -9,6 +9,7 @@ package container
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
@@ -19,11 +20,18 @@ import (
 
 var vmLogger = flogging.MustGetLogger("container")
 
-//go:generate counterfeiter -o mock/vm.go --fake-name VM . VM
+//go:generate counterfeiter -o mock/docker_builder.go --fake-name DockerBuilder . DockerBuilder
 
-//VM is an abstract virtual image for supporting arbitrary virual machines
-type VM interface {
+// DockerBuilder is what is exposed by the dockercontroller
+type DockerBuilder interface {
 	Build(ccid string, metadata *persistence.ChaincodePackageMetadata, codePackageStream io.Reader) (Instance, error)
+}
+
+//go:generate counterfeiter -o mock/external_builder.go --fake-name ExternalBuilder . ExternalBuilder
+
+// ExternalBuilder is what is exposed by the dockercontroller
+type ExternalBuilder interface {
+	Build(ccid string, metadata []byte, codePackageStream io.Reader) (Instance, error)
 }
 
 //go:generate counterfeiter -o mock/instance.go --fake-name Instance . Instance
@@ -33,6 +41,7 @@ type VM interface {
 // 'image' also seemed inappropriate.  So, the vague 'Instance' is used here.
 type Instance interface {
 	Start(peerConnection *ccintf.PeerConnection) error
+	ChaincodeServerInfo() (*ccintf.ChaincodeServerInfo, error)
 	Stop() error
 	Wait() (int, error)
 }
@@ -41,6 +50,10 @@ type UninitializedInstance struct{}
 
 func (UninitializedInstance) Start(peerConnection *ccintf.PeerConnection) error {
 	return errors.Errorf("instance has not yet been built, cannot be started")
+}
+
+func (UninitializedInstance) ChaincodeServerInfo() (*ccintf.ChaincodeServerInfo, error) {
+	return nil, errors.Errorf("instance has not yet been built, cannot get chaincode server info")
 }
 
 func (UninitializedInstance) Stop() error {
@@ -55,12 +68,12 @@ func (UninitializedInstance) Wait() (int, error) {
 
 // PackageProvider gets chaincode packages from the filesystem.
 type PackageProvider interface {
-	GetChaincodePackage(packageID string) (*persistence.ChaincodePackageMetadata, io.ReadCloser, error)
+	GetChaincodePackage(packageID string) (md *persistence.ChaincodePackageMetadata, mdBytes []byte, codeStream io.ReadCloser, err error)
 }
 
 type Router struct {
-	ExternalVM      VM
-	DockerVM        VM
+	ExternalBuilder ExternalBuilder
+	DockerBuilder   DockerBuilder
 	containers      map[string]Instance
 	PackageProvider PackageProvider
 	mutex           sync.Mutex
@@ -69,14 +82,10 @@ type Router struct {
 func (r *Router) getInstance(ccid string) Instance {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+
 	// Note, to resolve the locking problem which existed in the previous code, we never delete
 	// references from the map.  In this way, it is safe to release the lock and operate
 	// on the returned reference
-
-	if r.containers == nil {
-		r.containers = map[string]Instance{}
-	}
-
 	vm, ok := r.containers[ccid]
 	if !ok {
 		return UninitializedInstance{}
@@ -86,46 +95,51 @@ func (r *Router) getInstance(ccid string) Instance {
 }
 
 func (r *Router) Build(ccid string) error {
-	// for now, the package ID we retrieve from the FS is always the ccid
-	// the chaincode uses for registration
-	packageID := ccid
-
 	var instance Instance
 
-	var externalErr error
-	if r.ExternalVM != nil {
-		metadata, codeStream, err := r.PackageProvider.GetChaincodePackage(packageID)
+	if r.ExternalBuilder != nil {
+		// for now, the package ID we retrieve from the FS is always the ccid
+		// the chaincode uses for registration
+		_, mdBytes, codeStream, err := r.PackageProvider.GetChaincodePackage(ccid)
 		if err != nil {
-			return errors.WithMessage(err, "get chaincode package for external build failed")
+			return errors.WithMessage(err, "failed to get chaincode package for external build")
 		}
-		instance, externalErr = r.ExternalVM.Build(ccid, metadata, codeStream)
-		codeStream.Close()
+		defer codeStream.Close()
+
+		instance, err = r.ExternalBuilder.Build(ccid, mdBytes, codeStream)
+		if err != nil {
+			return errors.WithMessage(err, "external builder failed")
+		}
 	}
 
-	var dockerErr error
-	if r.ExternalVM == nil || externalErr != nil {
-		metadata, codeStream, err := r.PackageProvider.GetChaincodePackage(ccid)
-		if err != nil {
-			return errors.WithMessage(err, "get chaincode package for docker build failed")
+	if instance == nil {
+		if r.DockerBuilder == nil {
+			return errors.New("no DockerBuilder, cannot build")
 		}
-		instance, dockerErr = r.DockerVM.Build(ccid, metadata, codeStream)
-		codeStream.Close()
-	}
+		metadata, _, codeStream, err := r.PackageProvider.GetChaincodePackage(ccid)
+		if err != nil {
+			return errors.WithMessage(err, "failed to get chaincode package for docker build")
+		}
+		defer codeStream.Close()
 
-	if dockerErr != nil {
-		return errors.WithMessagef(dockerErr, "failed external (%s) and docker build", externalErr)
+		instance, err = r.DockerBuilder.Build(ccid, metadata, codeStream)
+		if err != nil {
+			return errors.WithMessage(err, "docker build failed")
+		}
 	}
 
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-
 	if r.containers == nil {
 		r.containers = map[string]Instance{}
 	}
-
 	r.containers[ccid] = instance
 
 	return nil
+}
+
+func (r *Router) ChaincodeServerInfo(ccid string) (*ccintf.ChaincodeServerInfo, error) {
+	return r.getInstance(ccid).ChaincodeServerInfo()
 }
 
 func (r *Router) Start(ccid string, peerConnection *ccintf.PeerConnection) error {
@@ -138,4 +152,29 @@ func (r *Router) Stop(ccid string) error {
 
 func (r *Router) Wait(ccid string) (int, error) {
 	return r.getInstance(ccid).Wait()
+}
+
+func (r *Router) Shutdown(timeout time.Duration) {
+	var wg sync.WaitGroup
+	for ccid := range r.containers {
+		wg.Add(1)
+		go func(ccid string) {
+			defer wg.Done()
+			if err := r.Stop(ccid); err != nil {
+				vmLogger.Warnw("failed to stop chaincode", "ccid", ccid, "error", err)
+			}
+		}(ccid)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-time.After(timeout):
+		vmLogger.Warning("timeout while stopping external chaincodes")
+	case <-done:
+	}
 }

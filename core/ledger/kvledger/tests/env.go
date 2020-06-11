@@ -12,17 +12,23 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hyperledger/fabric/common/ledger/blkstorage/fsblkstorage"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp"
+	"github.com/hyperledger/fabric/bccsp/sw"
+	"github.com/hyperledger/fabric/common/ledger/blkstorage"
 	"github.com/hyperledger/fabric/common/ledger/util"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
+	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/common/privdata"
+	"github.com/hyperledger/fabric/core/container/externalbuilder"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
+	corepeer "github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc/lscc"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -44,11 +50,19 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
-	return newEnvWithInitializer(t, &ledgermgmt.Initializer{})
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	return newEnvWithInitializer(t, &ledgermgmt.Initializer{
+		HashProvider: cryptoProvider,
+		EbMetadataProvider: &externalbuilder.MetadataProvider{
+			DurablePath: "testdata",
+		},
+	})
 }
 
 func newEnvWithInitializer(t *testing.T, initializer *ledgermgmt.Initializer) *env {
 	populateMissingsWithTestDefaults(t, initializer)
+
 	return &env{
 		assert:      assert.New(t),
 		initializer: initializer,
@@ -59,7 +73,10 @@ func (e *env) cleanup() {
 	if e.ledgerMgr != nil {
 		e.ledgerMgr.Close()
 	}
-	e.assert.NoError(os.RemoveAll(e.initializer.Config.RootFSPath))
+	// Ignore RemoveAll error because when a test mounts a dir to a couchdb container,
+	// the mounted dir cannot be deleted in CI builds. This has no impact to CI because it gets a new VM for each build.
+	// When running the test locally (macOS and linux VM), the mounted dirs are deleted without any error.
+	os.RemoveAll(e.initializer.Config.RootFSPath)
 }
 
 func (e *env) closeAllLedgersAndDrop(flags rebuildable) {
@@ -162,16 +179,12 @@ func (e *env) closeLedgerMgmt() {
 	e.ledgerMgr.Close()
 }
 
-func (e *env) getLedgerRootPath() string {
-	return e.initializer.Config.RootFSPath
-}
-
 func (e *env) getLevelstateDBPath() string {
 	return kvledger.StateDBPath(e.initializer.Config.RootFSPath)
 }
 
 func (e *env) getBlockIndexDBPath() string {
-	return filepath.Join(kvledger.BlockStorePath(e.initializer.Config.RootFSPath), fsblkstorage.IndexDir)
+	return filepath.Join(kvledger.BlockStorePath(e.initializer.Config.RootFSPath), blkstorage.IndexDir)
 }
 
 func (e *env) getConfigHistoryDBPath() string {
@@ -199,7 +212,10 @@ func populateMissingsWithTestDefaults(t *testing.T, initializer *ledgermgmt.Init
 		identityDeserializerFactory := func(chainID string) msp.IdentityDeserializer {
 			return mgmt.GetManagerForChain(chainID)
 		}
-		membershipInfoProvider := privdata.NewMembershipInfoProvider(createSelfSignedData(), identityDeserializerFactory)
+		cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+		assert.NoError(t, err)
+		mspID := "test-mspid"
+		membershipInfoProvider := privdata.NewMembershipInfoProvider(mspID, createSelfSignedData(cryptoProvider), identityDeserializerFactory)
 		initializer.MembershipInfoProvider = membershipInfoProvider
 	}
 
@@ -208,7 +224,7 @@ func populateMissingsWithTestDefaults(t *testing.T, initializer *ledgermgmt.Init
 	}
 
 	if initializer.Config == nil {
-		rootPath, err := ioutil.TempDir("", "ledgersData")
+		rootPath, err := ioutil.TempDir("/tmp", "ledgersData")
 		if err != nil {
 			t.Fatalf("Failed to create root directory: %s", err)
 		}
@@ -237,10 +253,15 @@ func populateMissingsWithTestDefaults(t *testing.T, initializer *ledgermgmt.Init
 			PurgeInterval:   100,
 		}
 	}
+	if initializer.Config.SnapshotsConfig == nil {
+		initializer.Config.SnapshotsConfig = &ledger.SnapshotsConfig{
+			RootDir: filepath.Join(initializer.Config.RootFSPath, "snapshots"),
+		}
+	}
 }
 
-func createSelfSignedData() protoutil.SignedData {
-	sID := mgmt.GetLocalSigningIdentityOrPanic()
+func createSelfSignedData(cryptoProvider bccsp.BCCSP) protoutil.SignedData {
+	sID := mgmt.GetLocalSigningIdentityOrPanic(cryptoProvider)
 	msg := make([]byte, 32)
 	sig, err := sID.Sign(msg)
 	if err != nil {
@@ -254,5 +275,62 @@ func createSelfSignedData() protoutil.SignedData {
 		Data:      msg,
 		Signature: sig,
 		Identity:  peerIdentity,
+	}
+}
+
+// deployedCCInfoProviderWrapper is a wrapper type that overrides ChaincodeImplicitCollections
+type deployedCCInfoProviderWrapper struct {
+	*lifecycle.ValidatorCommitter
+	orgMSPIDs []string
+}
+
+// AllCollectionsConfigPkg overrides the same method in lifecycle.AllCollectionsConfigPkg.
+// It is basically a copy of lifecycle.AllCollectionsConfigPkg and invokes ImplicitCollections in the wrapper.
+// This method is called when the unit test code gets private data code path.
+func (dc *deployedCCInfoProviderWrapper) AllCollectionsConfigPkg(channelName, chaincodeName string, qe ledger.SimpleQueryExecutor) (*peer.CollectionConfigPackage, error) {
+	chaincodeInfo, err := dc.ChaincodeInfo(channelName, chaincodeName, qe)
+	if err != nil {
+		return nil, err
+	}
+	explicitCollectionConfigPkg := chaincodeInfo.ExplicitCollectionConfigPkg
+
+	implicitCollections, _ := dc.ImplicitCollections(channelName, "", nil)
+
+	var combinedColls []*peer.CollectionConfig
+	if explicitCollectionConfigPkg != nil {
+		combinedColls = append(combinedColls, explicitCollectionConfigPkg.Config...)
+	}
+	for _, implicitColl := range implicitCollections {
+		c := &peer.CollectionConfig{}
+		c.Payload = &peer.CollectionConfig_StaticCollectionConfig{StaticCollectionConfig: implicitColl}
+		combinedColls = append(combinedColls, c)
+	}
+	return &peer.CollectionConfigPackage{
+		Config: combinedColls,
+	}, nil
+}
+
+// ImplicitCollections overrides the same method in lifecycle.ValidatorCommitter.
+// It constructs static collection config using known mspids from the sample ledger.
+// This method is called when the unit test code gets collection configuration.
+func (dc *deployedCCInfoProviderWrapper) ImplicitCollections(channelName, chaincodeName string, qe ledger.SimpleQueryExecutor) ([]*peer.StaticCollectionConfig, error) {
+	collConfigs := make([]*peer.StaticCollectionConfig, 0, len(dc.orgMSPIDs))
+	for _, mspID := range dc.orgMSPIDs {
+		collConfigs = append(collConfigs, dc.ValidatorCommitter.GenerateImplicitCollectionForOrg(mspID))
+	}
+	return collConfigs, nil
+}
+
+func createDeployedCCInfoProvider(orgMSPIDs []string) ledger.DeployedChaincodeInfoProvider {
+	deployedCCInfoProvider := &lifecycle.ValidatorCommitter{
+		CoreConfig: &corepeer.Config{},
+		Resources: &lifecycle.Resources{
+			Serializer: &lifecycle.Serializer{},
+		},
+		LegacyDeployedCCInfoProvider: &lscc.DeployedCCInfoProvider{},
+	}
+	return &deployedCCInfoProviderWrapper{
+		ValidatorCommitter: deployedCCInfoProvider,
+		orgMSPIDs:          orgMSPIDs,
 	}
 }

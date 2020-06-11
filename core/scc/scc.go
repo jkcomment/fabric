@@ -7,10 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 package scc
 
 import (
+	"github.com/hyperledger/fabric-chaincode-go/shim"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/flogging"
-	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/container/ccintf"
-	pb "github.com/hyperledger/fabric/protos/peer"
 )
 
 // SysCCVersion is a constant used for the version field of system chaincodes.
@@ -62,22 +62,26 @@ func DeploySysCC(sysCC SelfDescribingSysCC, chaincodeStreamHandler ChaincodeStre
 	sysccLogger.Infof("deploying system chaincode '%s'", sysCC.Name())
 
 	ccid := ChaincodeID(sysCC.Name())
-
 	done := chaincodeStreamHandler.LaunchInProc(ccid)
 
 	peerRcvCCSend := make(chan *pb.ChaincodeMessage)
 	ccRcvPeerSend := make(chan *pb.ChaincodeMessage)
 
-	// TODO, these go routines leak in test.
 	go func() {
+		stream := newInProcStream(peerRcvCCSend, ccRcvPeerSend)
+		defer stream.CloseSend()
+
 		sysccLogger.Debugf("starting chaincode-support stream for  %s", ccid)
-		err := chaincodeStreamHandler.HandleChaincodeStream(newInProcStream(peerRcvCCSend, ccRcvPeerSend))
+		err := chaincodeStreamHandler.HandleChaincodeStream(stream)
 		sysccLogger.Criticalf("shim stream ended with err: %v", err)
 	}()
 
 	go func(sysCC SelfDescribingSysCC) {
+		stream := newInProcStream(ccRcvPeerSend, peerRcvCCSend)
+		defer stream.CloseSend()
+
 		sysccLogger.Debugf("chaincode started for %s", ccid)
-		err := shim.StartInProc(ccid, newInProcStream(ccRcvPeerSend, peerRcvCCSend), sysCC.Chaincode())
+		err := shim.StartInProc(ccid, stream, sysCC.Chaincode())
 		sysccLogger.Criticalf("system chaincode ended with err: %v", err)
 	}(sysCC)
 	<-done

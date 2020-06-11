@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/cluster/mocks"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -27,7 +27,6 @@ import (
 )
 
 func TestRPCChangeDestination(t *testing.T) {
-	t.Parallel()
 	// We send a Submit() to 2 different nodes - 1 and 2.
 	// The first invocation of Submit() establishes a stream with node 1
 	// and the second establishes a stream with node 2.
@@ -92,7 +91,6 @@ func TestRPCChangeDestination(t *testing.T) {
 }
 
 func TestSend(t *testing.T) {
-	t.Parallel()
 	submitRequest := &orderer.SubmitRequest{Channel: "mychannel"}
 	submitResponse := &orderer.StepResponse{
 		Payload: &orderer.StepResponse_SubmitRes{
@@ -223,9 +221,7 @@ func TestSend(t *testing.T) {
 				Comm:          comm,
 			}
 
-			var err error
-
-			err = testCase.method(rpc)
+			err := testCase.method(rpc)
 			if testCase.remoteError == nil && testCase.stepReturns[1] == nil {
 				<-sent
 			}
@@ -257,8 +253,6 @@ func TestRPCGarbageCollection(t *testing.T) {
 	// Afterwards - make that stream be aborted, and send a message to a different
 	// remote node.
 	// The first stream should be cleaned from the mapping.
-
-	t.Parallel()
 
 	comm := &mocks.Communicator{}
 	client := &mocks.ClusterClient{}

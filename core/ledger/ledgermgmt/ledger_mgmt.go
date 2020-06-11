@@ -8,15 +8,16 @@ package ledgermgmt
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/metrics"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/cceventmgmt"
 	"github.com/hyperledger/fabric/core/ledger/kvledger"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/pkg/errors"
 )
 
@@ -28,10 +29,16 @@ var ErrLedgerAlreadyOpened = errors.New("ledger already opened")
 // ErrLedgerMgmtNotInitialized is thrown when ledger mgmt is used before initializing this
 var ErrLedgerMgmtNotInitialized = errors.New("ledger mgmt should be initialized before using")
 
+// LedgerMgr manages ledgers for all channels
 type LedgerMgr struct {
-	lock           sync.Mutex
-	openedLedgers  map[string]ledger.PeerLedger
-	ledgerProvider ledger.PeerLedgerProvider
+	lock               sync.Mutex
+	openedLedgers      map[string]ledger.PeerLedger
+	ledgerProvider     ledger.PeerLedgerProvider
+	ebMetadataProvider MetadataProvider
+}
+
+type MetadataProvider interface {
+	PackageMetadata(ccid string) ([]byte, error)
 }
 
 // Initializer encapsulates all the external dependencies for the ledger module
@@ -44,6 +51,8 @@ type Initializer struct {
 	MetricsProvider                 metrics.Provider
 	HealthCheckRegistry             ledger.HealthCheckRegistry
 	Config                          *ledger.Config
+	HashProvider                    ledger.HashProvider
+	EbMetadataProvider              MetadataProvider
 }
 
 // NewLedgerMgr creates a new LedgerMgr
@@ -63,14 +72,16 @@ func NewLedgerMgr(initializer *Initializer) *LedgerMgr {
 			HealthCheckRegistry:             initializer.HealthCheckRegistry,
 			Config:                          initializer.Config,
 			CustomTxProcessors:              initializer.CustomTxProcessors,
+			HashProvider:                    initializer.HashProvider,
 		},
 	)
 	if err != nil {
-		panic(errors.WithMessage(err, "Error in instantiating ledger provider"))
+		panic(fmt.Sprintf("Error in instantiating ledger provider: %+v", err))
 	}
 	ledgerMgr := &LedgerMgr{
-		openedLedgers:  make(map[string]ledger.PeerLedger),
-		ledgerProvider: provider,
+		openedLedgers:      make(map[string]ledger.PeerLedger),
+		ledgerProvider:     provider,
+		ebMetadataProvider: initializer.EbMetadataProvider,
 	}
 	// TODO remove the following package level init
 	cceventmgmt.Initialize(&chaincodeInfoProviderImpl{
@@ -215,5 +226,13 @@ func (p *chaincodeInfoProviderImpl) GetDeployedChaincodeInfo(chainid string,
 
 // RetrieveChaincodeArtifacts implements function in the interface cceventmgmt.ChaincodeInfoProvider
 func (p *chaincodeInfoProviderImpl) RetrieveChaincodeArtifacts(chaincodeDefinition *cceventmgmt.ChaincodeDefinition) (installed bool, dbArtifactsTar []byte, err error) {
-	return ccprovider.ExtractStatedbArtifactsForChaincode(chaincodeDefinition.Name + ":" + chaincodeDefinition.Version)
+	ccid := chaincodeDefinition.Name + ":" + chaincodeDefinition.Version
+	md, err := p.ledgerMgr.ebMetadataProvider.PackageMetadata(ccid)
+	if err != nil {
+		return false, nil, err
+	}
+	if md != nil {
+		return true, md, nil
+	}
+	return ccprovider.ExtractStatedbArtifactsForChaincode(ccid)
 }

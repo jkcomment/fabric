@@ -10,43 +10,50 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/orderer"
 	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/deliver/mock"
-	"github.com/hyperledger/fabric/common/ledger/blockledger/mocks"
-	"github.com/hyperledger/fabric/common/mocks/config"
-	mockconfigtx "github.com/hyperledger/fabric/common/mocks/configtx"
-	mockpolicies "github.com/hyperledger/fabric/common/mocks/policies"
+	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	"github.com/hyperledger/fabric/common/policies"
-	"github.com/hyperledger/fabric/internal/configtxgen/configtxgentest"
+	"github.com/hyperledger/fabric/core/config/configtest"
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	"github.com/hyperledger/fabric/internal/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	msgprocessormocks "github.com/hyperledger/fabric/orderer/common/msgprocessor/mocks"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/orderer"
+	"github.com/hyperledger/fabric/orderer/common/multichannel/mocks"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 )
 
+//go:generate counterfeiter -o mocks/policy.go --fake-name Policy . policy
+//go:generate counterfeiter -o mocks/policy_manager.go --fake-name PolicyManager . policyManager
+//go:generate counterfeiter -o mocks/read_writer.go --fake-name ReadWriter . readWriter
+
+type policy interface{ policies.Policy }
+type policyManager interface{ policies.Manager }
+type readWriter interface{ blockledger.ReadWriter }
+
 func TestChainSupportBlock(t *testing.T) {
 	ledger := &mocks.ReadWriter{}
-	ledger.On("Height").Return(uint64(100))
+	ledger.HeightReturns(100)
 	iterator := &mock.BlockIterator{}
 	iterator.NextReturns(&common.Block{Header: &common.BlockHeader{Number: 99}}, common.Status_SUCCESS)
-	ledger.On("Iterator", &orderer.SeekPosition{
-		Type: &orderer.SeekPosition_Specified{
-			Specified: &orderer.SeekSpecified{Number: 99},
-		},
-	}).Return(iterator, uint64(99))
-	cs := &ChainSupport{ledgerResources: &ledgerResources{ReadWriter: ledger}}
+	ledger.IteratorReturns(iterator, 99)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	cs := &ChainSupport{
+		ledgerResources: &ledgerResources{ReadWriter: ledger},
+		BCCSP:           cryptoProvider,
+	}
 
 	assert.Nil(t, cs.Block(100))
 	assert.Equal(t, uint64(99), cs.Block(99).Header.Number)
 }
 
 type mutableResourcesMock struct {
-	config.Resources
+	*mocks.Resources
 	newConsensusMetadataVal []byte
 }
 
@@ -55,23 +62,27 @@ func (*mutableResourcesMock) Update(*channelconfig.Bundle) {
 }
 
 func (mrm *mutableResourcesMock) CreateBundle(channelID string, c *common.Config) (channelconfig.Resources, error) {
-	return &config.Resources{
-		OrdererConfigVal: &config.Orderer{
-			ConsensusMetadataVal: mrm.newConsensusMetadataVal,
-		},
-	}, nil
+	mockOrderer := &mocks.OrdererConfig{}
+	mockOrderer.ConsensusMetadataReturns(mrm.newConsensusMetadataVal)
+	mockResources := &mocks.Resources{}
+	mockResources.OrdererConfigReturns(mockOrderer, true)
+
+	return mockResources, nil
 
 }
 
 func TestVerifyBlockSignature(t *testing.T) {
-	policyMgr := &mockpolicies.Manager{
-		PolicyMap: make(map[string]policies.Policy),
-	}
+	mockResources := &mocks.Resources{}
+	mockValidator := &mocks.ConfigTXValidator{}
+	mockValidator.ChannelIDReturns("mychannel")
+	mockResources.ConfigtxValidatorReturns(mockValidator)
+
+	mockPolicy := &mocks.Policy{}
+	mockPolicyManager := &mocks.PolicyManager{}
+	mockResources.PolicyManagerReturns(mockPolicyManager)
+
 	ms := &mutableResourcesMock{
-		Resources: config.Resources{
-			ConfigtxValidatorVal: &mockconfigtx.Validator{ChannelIDVal: "mychannel"},
-			PolicyManagerVal:     policyMgr,
-		},
+		Resources: mockResources,
 	}
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
@@ -82,25 +93,24 @@ func TestVerifyBlockSignature(t *testing.T) {
 				bccsp:            cryptoProvider,
 			},
 		},
+		BCCSP: cryptoProvider,
 	}
 
 	// Scenario I: Policy manager isn't initialized
 	// and thus policy cannot be found
+	mockPolicyManager.GetPolicyReturns(nil, false)
 	err = cs.VerifyBlockSignature([]*protoutil.SignedData{}, nil)
 	assert.EqualError(t, err, "policy /Channel/Orderer/BlockValidation wasn't found")
 
+	mockPolicyManager.GetPolicyReturns(mockPolicy, true)
 	// Scenario II: Policy manager finds policy, but it evaluates
 	// to error.
-	policyMgr.PolicyMap["/Channel/Orderer/BlockValidation"] = &mockpolicies.Policy{
-		Err: errors.New("invalid signature"),
-	}
+	mockPolicy.EvaluateSignedDataReturns(errors.New("invalid signature"))
 	err = cs.VerifyBlockSignature([]*protoutil.SignedData{}, nil)
 	assert.EqualError(t, err, "block verification failed: invalid signature")
 
 	// Scenario III: Policy manager finds policy, and it evaluates to success
-	policyMgr.PolicyMap["/Channel/Orderer/BlockValidation"] = &mockpolicies.Policy{
-		Err: nil,
-	}
+	mockPolicy.EvaluateSignedDataReturns(nil)
 	assert.NoError(t, cs.VerifyBlockSignature([]*protoutil.SignedData{}, nil))
 
 	// Scenario IV: A bad config envelope is passed
@@ -115,21 +125,22 @@ func TestVerifyBlockSignature(t *testing.T) {
 func TestConsensusMetadataValidation(t *testing.T) {
 	oldConsensusMetadata := []byte("old consensus metadata")
 	newConsensusMetadata := []byte("new consensus metadata")
+	mockValidator := &mocks.ConfigTXValidator{}
+	mockValidator.ChannelIDReturns("mychannel")
+	mockValidator.ProposeConfigUpdateReturns(testConfigEnvelope(t), nil)
+	mockOrderer := &mocks.OrdererConfig{}
+	mockOrderer.ConsensusMetadataReturns(oldConsensusMetadata)
+	mockResources := &mocks.Resources{}
+	mockResources.ConfigtxValidatorReturns(mockValidator)
+	mockResources.OrdererConfigReturns(mockOrderer, true)
+
 	ms := &mutableResourcesMock{
-		Resources: config.Resources{
-			ConfigtxValidatorVal: &mockconfigtx.Validator{
-				ChannelIDVal:           "mychannel",
-				ProposeConfigUpdateVal: testConfigEnvelope(t),
-			},
-			OrdererConfigVal: &config.Orderer{
-				ConsensusMetadataVal: oldConsensusMetadata,
-			},
-		},
+		Resources:               mockResources,
 		newConsensusMetadataVal: newConsensusMetadata,
 	}
 	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
 	assert.NoError(t, err)
-	mv := &msgprocessormocks.FakeMetadataValidator{}
+	mv := &msgprocessormocks.MetadataValidator{}
 	cs := &ChainSupport{
 		ledgerResources: &ledgerResources{
 			configResources: &configResources{
@@ -138,6 +149,7 @@ func TestConsensusMetadataValidation(t *testing.T) {
 			},
 		},
 		MetadataValidator: mv,
+		BCCSP:             cryptoProvider,
 	}
 
 	// case 1: valid consensus metadata update
@@ -158,7 +170,7 @@ func TestConsensusMetadataValidation(t *testing.T) {
 }
 
 func testConfigEnvelope(t *testing.T) *common.ConfigEnvelope {
-	conf := configtxgentest.Load(localconfig.SampleInsecureSoloProfile)
+	conf := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	group, err := encoder.NewChannelGroup(conf)
 	assert.NoError(t, err)
 	group.Groups["Orderer"].Values["ConsensusType"].Value, err = proto.Marshal(&orderer.ConsensusType{

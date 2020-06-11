@@ -9,8 +9,9 @@ package etcdraft_test
 import (
 	"testing"
 
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
-	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/multichannel"
@@ -24,6 +25,8 @@ func TestNewEtcdRaftConsenter(t *testing.T) {
 	assert.NoError(t, err)
 	defer srv.Stop()
 	dialer := &cluster.PredicateDialer{}
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	consenter := etcdraft.New(dialer,
 		&localconfig.TopLevel{},
 		comm.ServerConfig{
@@ -31,7 +34,10 @@ func TestNewEtcdRaftConsenter(t *testing.T) {
 				Certificate: []byte{1, 2, 3},
 			},
 		}, srv, &multichannel.Registrar{},
-		&mocks.InactiveChainRegistry{}, &disabled.Provider{})
+		&mocks.InactiveChainRegistry{},
+		&disabled.Provider{},
+		cryptoProvider,
+	)
 
 	// Assert that the certificate from the gRPC server was passed to the consenter
 	assert.Equal(t, []byte{1, 2, 3}, consenter.Cert)

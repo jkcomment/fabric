@@ -9,18 +9,12 @@ package etcdraft
 import (
 	"testing"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/common/flogging"
-	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 )
-
-func getSeedBlock() *cb.Block {
-	seedBlock := protoutil.NewBlock(0, []byte("firsthash"))
-	seedBlock.Data.Data = [][]byte{[]byte("somebytes")}
-	return seedBlock
-}
 
 func TestCreateNextBlock(t *testing.T) {
 	first := protoutil.NewBlock(0, []byte("firsthash"))

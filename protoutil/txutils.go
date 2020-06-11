@@ -11,9 +11,8 @@ import (
 	"crypto/sha256"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric/internal/pkg/identity"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/peer"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/pkg/errors"
 )
 
@@ -62,7 +61,7 @@ func GetEnvelopeFromBlock(data []byte) (*common.Envelope, error) {
 func CreateSignedEnvelope(
 	txType common.HeaderType,
 	channelID string,
-	signer identity.SignerSerializer,
+	signer Signer,
 	dataMsg proto.Message,
 	msgVersion int32,
 	epoch uint64,
@@ -76,7 +75,7 @@ func CreateSignedEnvelope(
 func CreateSignedEnvelopeWithTLSBinding(
 	txType common.HeaderType,
 	channelID string,
-	signer identity.SignerSerializer,
+	signer Signer,
 	dataMsg proto.Message,
 	msgVersion int32,
 	epoch uint64,
@@ -245,7 +244,7 @@ func CreateProposalResponse(
 	results []byte,
 	events []byte,
 	ccid *peer.ChaincodeID,
-	signingEndorser identity.SignerSerializer,
+	signingEndorser Signer,
 ) (*peer.ProposalResponse, error) {
 	hdr, err := UnmarshalHeader(hdrbytes)
 	if err != nil {
@@ -334,7 +333,7 @@ func CreateProposalResponseFailure(
 
 // GetSignedProposal returns a signed proposal given a Proposal message and a
 // signing identity
-func GetSignedProposal(prop *peer.Proposal, signer identity.SignerSerializer) (*peer.SignedProposal, error) {
+func GetSignedProposal(prop *peer.Proposal, signer Signer) (*peer.SignedProposal, error) {
 	// check for nil argument
 	if prop == nil || signer == nil {
 		return nil, errors.New("nil arguments")
@@ -356,14 +355,14 @@ func GetSignedProposal(prop *peer.Proposal, signer identity.SignerSerializer) (*
 // MockSignedEndorserProposalOrPanic creates a SignedProposal with the
 // passed arguments
 func MockSignedEndorserProposalOrPanic(
-	chainID string,
+	channelID string,
 	cs *peer.ChaincodeSpec,
 	creator,
 	signature []byte,
 ) (*peer.SignedProposal, *peer.Proposal) {
 	prop, _, err := CreateChaincodeProposal(
 		common.HeaderType_ENDORSER_TRANSACTION,
-		chainID,
+		channelID,
 		&peer.ChaincodeInvocationSpec{ChaincodeSpec: cs},
 		creator)
 	if err != nil {
@@ -379,9 +378,9 @@ func MockSignedEndorserProposalOrPanic(
 }
 
 func MockSignedEndorserProposal2OrPanic(
-	chainID string,
+	channelID string,
 	cs *peer.ChaincodeSpec,
-	signer identity.SignerSerializer,
+	signer Signer,
 ) (*peer.SignedProposal, *peer.Proposal) {
 	serializedSigner, err := signer.Serialize()
 	if err != nil {
@@ -390,7 +389,7 @@ func MockSignedEndorserProposal2OrPanic(
 
 	prop, _, err := CreateChaincodeProposal(
 		common.HeaderType_ENDORSER_TRANSACTION,
-		chainID,
+		channelID,
 		&peer.ChaincodeInvocationSpec{ChaincodeSpec: &peer.ChaincodeSpec{}},
 		serializedSigner)
 	if err != nil {

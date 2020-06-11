@@ -15,11 +15,12 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	"github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -58,7 +59,7 @@ func TestCDSProposals(t *testing.T) {
 	policy := []byte("policy")
 	escc := []byte("escc")
 	vscc := []byte("vscc")
-	chainID := "testchainid"
+	chainID := "testchannelid"
 
 	// install
 	prop, txid, err = protoutil.CreateInstallProposalFromCDS(cds, creator)
@@ -84,7 +85,7 @@ func TestProposal(t *testing.T) {
 	// create a proposal from a ChaincodeInvocationSpec
 	prop, _, err := protoutil.CreateChaincodeProposalWithTransient(
 		common.HeaderType_ENDORSER_TRANSACTION,
-		testChainID, createCIS(),
+		testChannelID, createCIS(),
 		[]byte("creator"),
 		map[string][]byte{"certx": []byte("transient")})
 	if err != nil {
@@ -197,7 +198,7 @@ func TestProposalWithTxID(t *testing.T) {
 	// create a proposal from a ChaincodeInvocationSpec
 	prop, txid, err := protoutil.CreateChaincodeProposalWithTxIDAndTransient(
 		common.HeaderType_ENDORSER_TRANSACTION,
-		testChainID,
+		testChannelID,
 		createCIS(),
 		[]byte("creator"),
 		"testtx",
@@ -209,7 +210,7 @@ func TestProposalWithTxID(t *testing.T) {
 
 	prop, txid, err = protoutil.CreateChaincodeProposalWithTxIDAndTransient(
 		common.HeaderType_ENDORSER_TRANSACTION,
-		testChainID,
+		testChannelID,
 		createCIS(),
 		[]byte("creator"),
 		"",
@@ -325,7 +326,7 @@ func TestProposalResponse(t *testing.T) {
 
 func TestEnvelope(t *testing.T) {
 	// create a proposal from a ChaincodeInvocationSpec
-	prop, _, err := protoutil.CreateChaincodeProposal(common.HeaderType_ENDORSER_TRANSACTION, testChainID, createCIS(), signerSerialized)
+	prop, _, err := protoutil.CreateChaincodeProposal(common.HeaderType_ENDORSER_TRANSACTION, testChannelID, createCIS(), signerSerialized)
 	if err != nil {
 		t.Fatalf("Could not create chaincode proposal, err %s\n", err)
 		return
@@ -478,7 +479,13 @@ func TestMain(m *testing.M) {
 		fmt.Printf("Could not initialize msp")
 		return
 	}
-	signer, err = mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	if err != nil {
+		os.Exit(-1)
+		fmt.Printf("Could not initialize cryptoProvider")
+		return
+	}
+	signer, err = mspmgmt.GetLocalMSP(cryptoProvider).GetDefaultSigningIdentity()
 	if err != nil {
 		os.Exit(-1)
 		fmt.Printf("Could not get signer")
@@ -493,4 +500,63 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(m.Run())
+}
+
+func TestInvokedChaincodeName(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		name, err := protoutil.InvokedChaincodeName(protoutil.MarshalOrPanic(&pb.Proposal{
+			Payload: protoutil.MarshalOrPanic(&pb.ChaincodeProposalPayload{
+				Input: protoutil.MarshalOrPanic(&pb.ChaincodeInvocationSpec{
+					ChaincodeSpec: &pb.ChaincodeSpec{
+						ChaincodeId: &pb.ChaincodeID{
+							Name: "cscc",
+						},
+					},
+				}),
+			}),
+		}))
+		assert.NoError(t, err)
+		assert.Equal(t, "cscc", name)
+	})
+
+	t.Run("BadProposalBytes", func(t *testing.T) {
+		_, err := protoutil.InvokedChaincodeName([]byte("garbage"))
+		assert.EqualError(t, err, "could not unmarshal proposal: proto: can't skip unknown wire type 7")
+	})
+
+	t.Run("BadChaincodeProposalBytes", func(t *testing.T) {
+		_, err := protoutil.InvokedChaincodeName(protoutil.MarshalOrPanic(&pb.Proposal{
+			Payload: []byte("garbage"),
+		}))
+		assert.EqualError(t, err, "could not unmarshal chaincode proposal payload: proto: can't skip unknown wire type 7")
+	})
+
+	t.Run("BadChaincodeInvocationSpec", func(t *testing.T) {
+		_, err := protoutil.InvokedChaincodeName(protoutil.MarshalOrPanic(&pb.Proposal{
+			Payload: protoutil.MarshalOrPanic(&pb.ChaincodeProposalPayload{
+				Input: []byte("garbage"),
+			}),
+		}))
+		assert.EqualError(t, err, "could not unmarshal chaincode invocation spec: proto: can't skip unknown wire type 7")
+	})
+
+	t.Run("NilChaincodeSpec", func(t *testing.T) {
+		_, err := protoutil.InvokedChaincodeName(protoutil.MarshalOrPanic(&pb.Proposal{
+			Payload: protoutil.MarshalOrPanic(&pb.ChaincodeProposalPayload{
+				Input: protoutil.MarshalOrPanic(&pb.ChaincodeInvocationSpec{}),
+			}),
+		}))
+		assert.EqualError(t, err, "chaincode spec is nil")
+	})
+
+	t.Run("NilChaincodeID", func(t *testing.T) {
+		_, err := protoutil.InvokedChaincodeName(protoutil.MarshalOrPanic(&pb.Proposal{
+			Payload: protoutil.MarshalOrPanic(&pb.ChaincodeProposalPayload{
+				Input: protoutil.MarshalOrPanic(&pb.ChaincodeInvocationSpec{
+					ChaincodeSpec: &pb.ChaincodeSpec{},
+				}),
+			}),
+		}))
+		assert.EqualError(t, err, "chaincode id is nil")
+	})
 }

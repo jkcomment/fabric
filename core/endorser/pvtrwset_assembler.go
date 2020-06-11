@@ -12,10 +12,10 @@ package endorser
 import (
 	"fmt"
 
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric-protos-go/transientstore"
 	"github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/ledger/rwset"
-	"github.com/hyperledger/fabric/protos/transientstore"
 	"github.com/pkg/errors"
 )
 
@@ -53,17 +53,16 @@ func AssemblePvtRWSet(channelName string,
 ) {
 	txPvtRwSetWithConfig := &transientstore.TxPvtReadWriteSetWithConfigInfo{
 		PvtRwset:          privData,
-		CollectionConfigs: make(map[string]*common.CollectionConfigPackage),
+		CollectionConfigs: make(map[string]*peer.CollectionConfigPackage),
 	}
 
 	for _, pvtRwset := range privData.NsPvtRwset {
 		namespace := pvtRwset.Namespace
 		if _, found := txPvtRwSetWithConfig.CollectionConfigs[namespace]; !found {
-			ccInfo, err := deployedCCInfoProvider.ChaincodeInfo(channelName, namespace, txsim)
+			colCP, err := deployedCCInfoProvider.AllCollectionsConfigPkg(channelName, namespace, txsim)
 			if err != nil {
 				return nil, errors.WithMessagef(err, "error while retrieving collection config for chaincode %#v", namespace)
 			}
-			colCP := ccInfo.AllCollectionsConfigPkg()
 			if colCP == nil {
 				return nil, errors.New(fmt.Sprintf("no collection config for chaincode %#v", namespace))
 			}
@@ -86,9 +85,9 @@ func trimCollectionConfigs(pvtData *transientstore.TxPvtReadWriteSetWithConfigIn
 		}
 	}
 
-	filteredConfigs := make(map[string]*common.CollectionConfigPackage)
+	filteredConfigs := make(map[string]*peer.CollectionConfigPackage)
 	for namespace, configs := range pvtData.CollectionConfigs {
-		filteredConfigs[namespace] = &common.CollectionConfigPackage{}
+		filteredConfigs[namespace] = &peer.CollectionConfigPackage{}
 		for _, conf := range configs.Config {
 			if colConf := conf.GetStaticCollectionConfig(); colConf != nil {
 				if _, found := flags[namespace][colConf.Name]; found {

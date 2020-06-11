@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/gossip/msgstore"
 	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
-	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/pkg/errors"
 )
 
@@ -121,7 +121,7 @@ func NewDiscoveryService(self NetworkMember, comm CommService, crypt CryptoServi
 	go d.periodicalCheckAlive()
 	go d.handleMessages()
 	go d.periodicalReconnectToDead()
-	go d.handlePresumedDeadPeers()
+	go d.handleEvents()
 
 	return d
 }
@@ -270,7 +270,7 @@ func (d *gossipDiscoveryImpl) InitiateSync(peerNum int) {
 	}
 }
 
-func (d *gossipDiscoveryImpl) handlePresumedDeadPeers() {
+func (d *gossipDiscoveryImpl) handleEvents() {
 	defer d.logger.Debug("Stopped")
 
 	for {
@@ -279,6 +279,9 @@ func (d *gossipDiscoveryImpl) handlePresumedDeadPeers() {
 			if d.isAlive(deadPeer) {
 				d.expireDeadMembers([]common.PKIidType{deadPeer})
 			}
+		case changedPKIID := <-d.comm.IdentitySwitch():
+			// If a peer changed its PKI-ID, purge the old PKI-ID
+			d.purge(changedPKIID)
 		case <-d.toDieChan:
 			return
 		}
@@ -544,6 +547,17 @@ func (d *gossipDiscoveryImpl) handleAliveMessage(m *protoext.SignedGossipMessage
 	// else, ignore the message because it is too old
 }
 
+func (d *gossipDiscoveryImpl) purge(id common.PKIidType) {
+	d.logger.Infof("Purging %s from membership", id)
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	d.aliveMembership.Remove(id)
+	d.deadMembership.Remove(id)
+	delete(d.id2Member, string(id))
+	delete(d.deadLastTS, string(id))
+	delete(d.aliveLastTS, string(id))
+}
+
 func (d *gossipDiscoveryImpl) isSentByMe(m *protoext.SignedGossipMessage) bool {
 	pkiID := m.GetAliveMsg().Membership.PkiId
 	if !equalPKIid(pkiID, d.self.PKIid) {
@@ -689,7 +703,7 @@ func (d *gossipDiscoveryImpl) expireDeadMembers(dead []common.PKIidType) {
 	d.logger.Warning("Entering", dead)
 	defer d.logger.Warning("Exiting")
 
-	var deadMembers2Expire []*NetworkMember
+	var deadMembers2Expire []NetworkMember
 
 	d.lock.Lock()
 
@@ -697,7 +711,7 @@ func (d *gossipDiscoveryImpl) expireDeadMembers(dead []common.PKIidType) {
 		if _, isAlive := d.aliveLastTS[string(pkiID)]; !isAlive {
 			continue
 		}
-		deadMembers2Expire = append(deadMembers2Expire, d.id2Member[string(pkiID)])
+		deadMembers2Expire = append(deadMembers2Expire, d.id2Member[string(pkiID)].Clone())
 		// move lastTS from alive to dead
 		lastTS, hasLastTS := d.aliveLastTS[string(pkiID)]
 		if hasLastTS {
@@ -715,7 +729,7 @@ func (d *gossipDiscoveryImpl) expireDeadMembers(dead []common.PKIidType) {
 
 	for _, member2Expire := range deadMembers2Expire {
 		d.logger.Warning("Closing connection to", member2Expire)
-		d.comm.CloseConn(member2Expire)
+		d.comm.CloseConn(&member2Expire)
 	}
 }
 

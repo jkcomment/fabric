@@ -11,16 +11,16 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/metrics/metricsfakes"
 	"github.com/hyperledger/fabric/common/util"
-	"github.com/hyperledger/fabric/core/aclmgmt/resources"
+	ar "github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/fake"
 	"github.com/hyperledger/fabric/core/chaincode/mock"
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	"github.com/hyperledger/fabric/core/scc"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -66,7 +66,7 @@ var _ = Describe("Handler", func() {
 
 		responseNotifier = make(chan *pb.ChaincodeMessage, 1)
 		txContext = &chaincode.TransactionContext{
-			ChainID:              "channel-id",
+			ChannelID:            "channel-id",
 			NamespaceID:          "cc-instance-name",
 			TXSimulator:          fakeTxSimulator,
 			HistoryQueryExecutor: fakeHistoryQueryExecutor,
@@ -2176,7 +2176,7 @@ var _ = Describe("Handler", func() {
 
 			Expect(fakeACLProvider.CheckACLCallCount()).To(Equal(1))
 			resource, chainID, proposal := fakeACLProvider.CheckACLArgsForCall(0)
-			Expect(resource).To(Equal(resources.Peer_ChaincodeToChaincode))
+			Expect(resource).To(Equal(ar.Peer_ChaincodeToChaincode))
 			Expect(chainID).To(Equal("channel-id"))
 			Expect(proposal).To(Equal(expectedSignedProp))
 		})
@@ -2199,7 +2199,7 @@ var _ = Describe("Handler", func() {
 
 				Expect(fakeACLProvider.CheckACLCallCount()).To(Equal(1))
 				resource, chainID, proposal := fakeACLProvider.CheckACLArgsForCall(0)
-				Expect(resource).To(Equal(resources.Peer_ChaincodeToChaincode))
+				Expect(resource).To(Equal(ar.Peer_ChaincodeToChaincode))
 				Expect(chainID).To(Equal("target-channel-id"))
 				Expect(proposal).To(Equal(expectedSignedProp))
 			})
@@ -2539,6 +2539,23 @@ var _ = Describe("Handler", func() {
 			})
 		})
 
+		Context("when the chaincode stream terminates", func() {
+			It("returns an error", func() {
+				streamDoneChan := make(chan struct{})
+				chaincode.SetStreamDoneChan(handler, streamDoneChan)
+
+				errCh := make(chan error, 1)
+				go func() {
+					_, err := handler.Execute(txParams, "chaincode-name", incomingMessage, time.Hour)
+					errCh <- err
+				}()
+				Consistently(errCh).ShouldNot(Receive())
+
+				close(streamDoneChan)
+				Eventually(errCh).Should(Receive(MatchError("chaincode stream terminated")))
+			})
+		})
+
 		Context("when execute times out", func() {
 			It("returns an error", func() {
 				errCh := make(chan error, 1)
@@ -2716,6 +2733,22 @@ var _ = Describe("Handler", func() {
 			Eventually(fakeChatStream.RecvCallCount).Should(Equal(100))
 		})
 
+		It("manages the stream done channel", func() {
+			releaseChan := make(chan struct{})
+			fakeChatStream.RecvStub = func() (*pb.ChaincodeMessage, error) {
+				<-releaseChan
+				return nil, errors.New("cc-went-away")
+			}
+			go handler.ProcessStream(fakeChatStream)
+			Eventually(fakeChatStream.RecvCallCount).Should(Equal(1))
+
+			streamDoneChan := chaincode.StreamDone(handler)
+			Consistently(streamDoneChan).ShouldNot(Receive())
+
+			close(releaseChan)
+			Eventually(streamDoneChan).Should(BeClosed())
+		})
+
 		Context("when receive fails with an io.EOF", func() {
 			BeforeEach(func() {
 				fakeChatStream.RecvReturns(nil, io.EOF)
@@ -2734,7 +2767,7 @@ var _ = Describe("Handler", func() {
 
 			It("returns an error", func() {
 				err := handler.ProcessStream(fakeChatStream)
-				Expect(err).To(MatchError("receive failed: chocolate"))
+				Expect(err).To(MatchError("receive from chaincode support stream failed: chocolate"))
 			})
 		})
 
@@ -2743,7 +2776,7 @@ var _ = Describe("Handler", func() {
 				fakeChatStream.RecvReturns(nil, nil)
 			})
 
-			It("retuns an error", func() {
+			It("returns an error", func() {
 				err := handler.ProcessStream(fakeChatStream)
 				Expect(err).To(MatchError("received nil message, ending chaincode support stream"))
 			})
@@ -2817,8 +2850,7 @@ var _ = Describe("Handler", func() {
 		Context("when an async error is sent", func() {
 			var (
 				incomingMessage *pb.ChaincodeMessage
-
-				recvChan chan *pb.ChaincodeMessage
+				recvChan        chan *pb.ChaincodeMessage
 			)
 
 			BeforeEach(func() {
@@ -2920,10 +2952,10 @@ var _ = Describe("Handler", func() {
 			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name"}))
 			ci = chaincode.ParseName("name:version")
 			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name", ChaincodeVersion: "version"}))
-			ci = chaincode.ParseName("name/chain-id")
-			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name", ChainID: "chain-id"}))
-			ci = chaincode.ParseName("name:version/chain-id")
-			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name", ChaincodeVersion: "version", ChainID: "chain-id"}))
+			ci = chaincode.ParseName("name/channel-id")
+			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name", ChannelID: "channel-id"}))
+			ci = chaincode.ParseName("name:version/channel-id")
+			Expect(ci).To(Equal(&sysccprovider.ChaincodeInstance{ChaincodeName: "name", ChaincodeVersion: "version", ChannelID: "channel-id"}))
 		})
 	})
 

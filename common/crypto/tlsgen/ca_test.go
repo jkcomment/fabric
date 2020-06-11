@@ -10,8 +10,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
-	"math/rand"
 	"net"
 	"testing"
 	"time"
@@ -23,6 +21,7 @@ import (
 
 func createTLSService(t *testing.T, ca CA, host string) *grpc.Server {
 	keyPair, err := ca.NewServerCertKeyPair(host)
+	assert.NoError(t, err)
 	cert, err := tls.X509KeyPair(keyPair.Cert, keyPair.Key)
 	assert.NoError(t, err)
 	tlsConf := &tls.Config{
@@ -38,23 +37,20 @@ func TestTLSCA(t *testing.T) {
 	// This test checks that the CA can create certificates
 	// and corresponding keys that are signed by itself
 
-	rand.Seed(time.Now().UnixNano())
-	randomPort := 1234 + rand.Intn(1234) // some random port
-
 	ca, err := NewCA()
 	assert.NoError(t, err)
 	assert.NotNil(t, ca)
 
-	endpoint := fmt.Sprintf("127.0.0.1:%d", randomPort)
 	srv := createTLSService(t, ca, "127.0.0.1")
-	l, err := net.Listen("tcp", endpoint)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	assert.NoError(t, err)
-	go srv.Serve(l)
+	go srv.Serve(listener)
 	defer srv.Stop()
-	defer l.Close()
+	defer listener.Close()
 
 	probeTLS := func(kp *CertKeyPair) error {
 		cert, err := tls.X509KeyPair(kp.Cert, kp.Key)
+		assert.NoError(t, err)
 		tlsCfg := &tls.Config{
 			RootCAs:      x509.NewCertPool(),
 			Certificates: []tls.Certificate{cert},
@@ -63,7 +59,7 @@ func TestTLSCA(t *testing.T) {
 		tlsOpts := grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		conn, err := grpc.DialContext(ctx, fmt.Sprintf("127.0.0.1:%d", randomPort), tlsOpts, grpc.WithBlock())
+		conn, err := grpc.DialContext(ctx, listener.Addr().String(), tlsOpts, grpc.WithBlock())
 		if err != nil {
 			return err
 		}

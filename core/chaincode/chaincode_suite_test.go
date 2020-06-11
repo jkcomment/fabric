@@ -11,6 +11,7 @@ import (
 
 	"github.com/hyperledger/fabric/common/channelconfig"
 	commonledger "github.com/hyperledger/fabric/common/ledger"
+	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/common/privdata"
 	"github.com/hyperledger/fabric/core/container/ccintf"
@@ -62,11 +63,6 @@ type invoker interface {
 //go:generate counterfeiter -o mock/lifecycle.go --fake-name Lifecycle . lifecycle_
 type lifecycle_ interface {
 	chaincode.Lifecycle
-}
-
-//go:generate counterfeiter -o mock/legacy_chaincode_definition.go --fake-name LegacyChaincodeDefinition . legacyChaincodeDefinition
-type legacyChaincodeDefinition interface {
-	chaincode.LegacyChaincodeDefinition
 }
 
 //go:generate counterfeiter -o mock/chaincode_stream.go --fake-name ChaincodeStream . chaincodeStream
@@ -139,4 +135,24 @@ type applicationCapabilities interface {
 //go:generate counterfeiter -o mock/application_config.go --fake-name ApplicationConfig . applicationConfig
 type applicationConfig interface {
 	channelconfig.Application
+}
+
+//go:generate counterfeiter -o mock/resources.go --fake-name Resources . resources
+type resources interface {
+	channelconfig.Resources
+}
+
+//go:generate counterfeiter -o mock/policy_manager.go -fake-name PolicyManager . policyManager
+type policyManager interface {
+	policies.Manager
+}
+
+//go:generate counterfeiter -o mock/policy.go -fake-name Policy . policy
+type policy interface {
+	policies.Policy
+}
+
+//go:generate counterfeiter -o mock/connectionhandler.go --fake-name ConnectionHandler . connectionHandler
+type connectionHandler interface {
+	chaincode.ConnectionHandler
 }

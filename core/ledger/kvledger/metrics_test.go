@@ -1,5 +1,6 @@
 /*
 Copyright IBM Corp. All Rights Reserved.
+
 SPDX-License-Identifier: Apache-2.0
 */
 
@@ -9,14 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/ledger/testutil"
 	"github.com/hyperledger/fabric/common/metrics"
 	"github.com/hyperledger/fabric/common/metrics/metricsfakes"
 	lgr "github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/txmgr"
+	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/validation"
 	"github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -24,11 +26,15 @@ func TestStatsBlockCommit(t *testing.T) {
 	conf, cleanup := testConfig(t)
 	defer cleanup()
 	testMetricProvider := testutilConstructMetricProvider()
+
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	provider, err := NewProvider(
 		&lgr.Initializer{
 			DeployedChaincodeInfoProvider: &mock.DeployedChaincodeInfoProvider{},
 			MetricsProvider:               testMetricProvider.fakeProvider,
 			Config:                        conf,
+			HashProvider:                  cryptoProvider,
 		},
 	)
 	if err != nil {
@@ -70,7 +76,7 @@ func TestStatsBlockCommit(t *testing.T) {
 	// invoke updateBlockStats api explicitly and verify the calls with fake metrics
 	ledger.updateBlockStats(
 		1*time.Second, 2*time.Second, 3*time.Second,
-		[]*txmgr.TxStatInfo{
+		[]*validation.TxStatInfo{
 			{
 				ValidationCode: peer.TxValidationCode_VALID,
 				TxType:         common.HeaderType_ENDORSER_TRANSACTION,

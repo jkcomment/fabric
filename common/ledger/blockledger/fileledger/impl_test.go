@@ -13,14 +13,13 @@ import (
 	"os"
 	"testing"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	ab "github.com/hyperledger/fabric-protos-go/orderer"
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/flogging"
 	cl "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
-	cb "github.com/hyperledger/fabric/protos/common"
-	ab "github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -42,10 +41,11 @@ func initialize(t *testing.T) (*testEnv, *FileLedger) {
 	name, err := ioutil.TempDir("", "hyperledger_fabric")
 	assert.NoError(t, err, "Error creating temp dir: %s", err)
 
-	flf := New(name, &disabled.Provider{}).(*fileLedgerFactory)
-	fl, err := flf.GetOrCreate(genesisconfig.TestChainID)
-	assert.NoError(t, err, "Error GetOrCreate chain")
-
+	p, err := New(name, &disabled.Provider{})
+	assert.NoError(t, err)
+	flf := p.(*fileLedgerFactory)
+	fl, err := flf.GetOrCreate("testchannelid")
+	assert.NoError(t, err, "Error GetOrCreate channel")
 	fl.Append(genesisBlock)
 	return &testEnv{location: name, t: t, flf: flf}, fl.(*FileLedger)
 }
@@ -147,24 +147,26 @@ func TestReinitialization(t *testing.T) {
 	// add the block to the ledger
 	ledger1.Append(b1)
 
-	fl, err := tev.flf.GetOrCreate(genesisconfig.TestChainID)
+	fl, err := tev.flf.GetOrCreate("testchannelid")
 	ledger1, ok := fl.(*FileLedger)
-	assert.NoError(t, err, "Expected to successfully get test chain")
-	assert.Equal(t, 1, len(tev.flf.ChainIDs()), "Exptected not new chain to be created")
+	assert.NoError(t, err, "Expected to successfully get test channel")
+	assert.Equal(t, 1, len(tev.flf.ChannelIDs()), "Exptected not new channel to be created")
 	assert.True(t, ok, "Exptected type assertion to succeed")
+	assert.Equal(t, uint64(2), ledger1.Height(), "Block height should be 2. Got %v", ledger1.Height())
 
 	// shut down the ledger provider
 	tev.shutDown()
 
 	// re-initialize the ledger provider (not the test ledger itself!)
-	provider2 := New(tev.location, &disabled.Provider{})
+	provider2, err := New(tev.location, &disabled.Provider{})
+	assert.NoError(t, err)
 
 	// assert expected ledgers exist
-	chains := provider2.ChainIDs()
-	assert.Equal(t, 1, len(chains), "Should have recovered the chain")
+	channels := provider2.ChannelIDs()
+	assert.Equal(t, 1, len(channels), "Should have recovered the channel")
 
-	// get the existing test chain ledger
-	ledger2, err := provider2.GetOrCreate(chains[0])
+	// get the existing test channel ledger
+	ledger2, err := provider2.GetOrCreate(channels[0])
 	assert.NoError(t, err, "Unexpected error: %s", err)
 
 	fl = ledger2.(*FileLedger)

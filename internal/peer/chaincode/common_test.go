@@ -18,17 +18,17 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/bccsp/factory"
-	"github.com/hyperledger/fabric/common/cauthdsl"
+	"github.com/hyperledger/fabric/bccsp/sw"
+	"github.com/hyperledger/fabric/common/policydsl"
 	"github.com/hyperledger/fabric/core/config/configtest"
-	"github.com/hyperledger/fabric/internal/configtxgen/configtxgentest"
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/internal/peer/chaincode/mock"
 	"github.com/hyperledger/fabric/internal/peer/common"
 	"github.com/hyperledger/fabric/internal/pkg/identity"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
@@ -160,7 +160,7 @@ func TestGetOrdererEndpointFromConfigTx(t *testing.T) {
 
 	mockchain := "mockchain"
 	factory.InitFactories(nil)
-	config := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	config := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	pgen := encoder.New(config)
 	genesisBlock := pgen.GenesisBlockForChannel(mockchain)
 
@@ -170,7 +170,9 @@ func TestGetOrdererEndpointFromConfigTx(t *testing.T) {
 	}
 	mockEndorserClient := common.GetMockEndorserClient(mockResponse, nil)
 
-	ordererEndpoints, err := common.GetOrdererEndpointOfChain(mockchain, signer, mockEndorserClient)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	ordererEndpoints, err := common.GetOrdererEndpointOfChain(mockchain, signer, mockEndorserClient, cryptoProvider)
 	assert.NoError(t, err, "GetOrdererEndpointOfChain from genesis block")
 
 	assert.Equal(t, len(ordererEndpoints), 1)
@@ -190,7 +192,9 @@ func TestGetOrdererEndpointFail(t *testing.T) {
 	}
 	mockEndorserClient := common.GetMockEndorserClient(mockResponse, nil)
 
-	_, err = common.GetOrdererEndpointOfChain(mockchain, signer, mockEndorserClient)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	_, err = common.GetOrdererEndpointOfChain(mockchain, signer, mockEndorserClient, cryptoProvider)
 	assert.Error(t, err, "GetOrdererEndpointOfChain from invalid response")
 }
 
@@ -206,6 +210,46 @@ const sampleCollectionConfigGood = `[
 	}
 ]`
 
+const sampleCollectionConfigGoodNoMaxPeerCountOrRequiredPeerCount = `[
+	{
+		"name": "foo",
+		"policy": "OR('A.member', 'B.member')",
+		"blockToLive":10,
+		"memberOnlyRead": true,
+		"memberOnlyWrite": true
+	}
+]`
+
+const sampleCollectionConfigGoodWithSignaturePolicy = `[
+	{
+		"name": "foo",
+		"policy": "OR('A.member', 'B.member')",
+		"requiredPeerCount": 3,
+		"maxPeerCount": 483279847,
+		"blockToLive":10,
+		"memberOnlyRead": true,
+		"memberOnlyWrite": true,
+		"endorsementPolicy": {
+			"signaturePolicy": "OR('A.member', 'B.member')"
+		}
+	}
+]`
+
+const sampleCollectionConfigGoodWithChannelConfigPolicy = `[
+	{
+		"name": "foo",
+		"policy": "OR('A.member', 'B.member')",
+		"requiredPeerCount": 3,
+		"maxPeerCount": 483279847,
+		"blockToLive":10,
+		"memberOnlyRead": true,
+		"memberOnlyWrite": true,
+		"endorsementPolicy": {
+			"channelConfigPolicy": "/Channel/Application/Endorsement"
+		}
+	}
+]`
+
 const sampleCollectionConfigBad = `[
 	{
 		"name": "foo",
@@ -215,30 +259,134 @@ const sampleCollectionConfigBad = `[
 	}
 ]`
 
+const sampleCollectionConfigBadInvalidSignaturePolicy = `[
+	{
+		"name": "foo",
+		"policy": "OR('A.member', 'B.member')",
+		"requiredPeerCount": 3,
+		"maxPeerCount": 483279847,
+		"blockToLive":10,
+		"memberOnlyRead": true,
+		"memberOnlyWrite": true,
+		"endorsementPolicy": {
+			"signaturePolicy": "invalid"
+		}
+	}
+]`
+
+const sampleCollectionConfigBadSignaturePolicyAndChannelConfigPolicy = `[
+	{
+		"name": "foo",
+		"policy": "OR('A.member', 'B.member')",
+		"requiredPeerCount": 3,
+		"maxPeerCount": 483279847,
+		"blockToLive":10,
+		"memberOnlyRead": true,
+		"memberOnlyWrite": true,
+		"endorsementPolicy": {
+			"signaturePolicy": "OR('A.member', 'B.member')",
+			"channelConfigPolicy": "/Channel/Application/Endorsement"
+		}
+	}
+]`
+
 func TestCollectionParsing(t *testing.T) {
 	ccp, ccpBytes, err := getCollectionConfigFromBytes([]byte(sampleCollectionConfigGood))
 	assert.NoError(t, err)
 	assert.NotNil(t, ccp)
 	assert.NotNil(t, ccpBytes)
 	conf := ccp.Config[0].GetStaticCollectionConfig()
-	pol, _ := cauthdsl.FromString("OR('A.member', 'B.member')")
+	pol, _ := policydsl.FromString("OR('A.member', 'B.member')")
 	assert.Equal(t, 3, int(conf.RequiredPeerCount))
 	assert.Equal(t, 483279847, int(conf.MaximumPeerCount))
 	assert.Equal(t, "foo", conf.Name)
 	assert.True(t, proto.Equal(pol, conf.MemberOrgsPolicy.GetSignaturePolicy()))
 	assert.Equal(t, 10, int(conf.BlockToLive))
 	assert.Equal(t, true, conf.MemberOnlyRead)
+	assert.Nil(t, conf.EndorsementPolicy)
 	t.Logf("conf=%s", conf)
 
-	ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte(sampleCollectionConfigBad))
-	assert.Error(t, err)
-	assert.Nil(t, ccp)
-	assert.Nil(t, ccpBytes)
+	// Test default values for RequiredPeerCount and MaxPeerCount
+	ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte(sampleCollectionConfigGoodNoMaxPeerCountOrRequiredPeerCount))
+	assert.NoError(t, err)
+	assert.NotNil(t, ccp)
+	assert.NotNil(t, ccpBytes)
+	conf = ccp.Config[0].GetStaticCollectionConfig()
+	pol, _ = policydsl.FromString("OR('A.member', 'B.member')")
+	assert.Equal(t, 0, int(conf.RequiredPeerCount))
+	assert.Equal(t, 1, int(conf.MaximumPeerCount))
+	assert.Equal(t, "foo", conf.Name)
+	assert.True(t, proto.Equal(pol, conf.MemberOrgsPolicy.GetSignaturePolicy()))
+	assert.Equal(t, 10, int(conf.BlockToLive))
+	assert.Equal(t, true, conf.MemberOnlyRead)
+	assert.Nil(t, conf.EndorsementPolicy)
+	t.Logf("conf=%s", conf)
 
-	ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte("barf"))
-	assert.Error(t, err)
-	assert.Nil(t, ccp)
-	assert.Nil(t, ccpBytes)
+	ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte(sampleCollectionConfigGoodWithSignaturePolicy))
+	assert.NoError(t, err)
+	assert.NotNil(t, ccp)
+	assert.NotNil(t, ccpBytes)
+	conf = ccp.Config[0].GetStaticCollectionConfig()
+	pol, _ = policydsl.FromString("OR('A.member', 'B.member')")
+	assert.Equal(t, 3, int(conf.RequiredPeerCount))
+	assert.Equal(t, 483279847, int(conf.MaximumPeerCount))
+	assert.Equal(t, "foo", conf.Name)
+	assert.True(t, proto.Equal(pol, conf.MemberOrgsPolicy.GetSignaturePolicy()))
+	assert.Equal(t, 10, int(conf.BlockToLive))
+	assert.Equal(t, true, conf.MemberOnlyRead)
+	assert.True(t, proto.Equal(pol, conf.EndorsementPolicy.GetSignaturePolicy()))
+	t.Logf("conf=%s", conf)
+
+	ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte(sampleCollectionConfigGoodWithChannelConfigPolicy))
+	assert.NoError(t, err)
+	assert.NotNil(t, ccp)
+	assert.NotNil(t, ccpBytes)
+	conf = ccp.Config[0].GetStaticCollectionConfig()
+	pol, _ = policydsl.FromString("OR('A.member', 'B.member')")
+	assert.Equal(t, 3, int(conf.RequiredPeerCount))
+	assert.Equal(t, 483279847, int(conf.MaximumPeerCount))
+	assert.Equal(t, "foo", conf.Name)
+	assert.True(t, proto.Equal(pol, conf.MemberOrgsPolicy.GetSignaturePolicy()))
+	assert.Equal(t, 10, int(conf.BlockToLive))
+	assert.Equal(t, true, conf.MemberOnlyRead)
+	assert.Equal(t, "/Channel/Application/Endorsement", conf.EndorsementPolicy.GetChannelConfigPolicyReference())
+	t.Logf("conf=%s", conf)
+
+	failureTests := []struct {
+		name             string
+		collectionConfig string
+		expectedErr      string
+	}{
+		{
+			name:             "Invalid member orgs policy",
+			collectionConfig: sampleCollectionConfigBad,
+			expectedErr:      "invalid policy barf: unrecognized token 'barf' in policy string",
+		},
+		{
+			name:             "Invalid collection config",
+			collectionConfig: "barf",
+			expectedErr:      "could not parse the collection configuration: invalid character 'b' looking for beginning of value",
+		},
+		{
+			name:             "Invalid signature policy",
+			collectionConfig: sampleCollectionConfigBadInvalidSignaturePolicy,
+			expectedErr:      `invalid endorsement policy [&chaincode.endorsementPolicy{ChannelConfigPolicy:"", SignaturePolicy:"invalid"}]: invalid signature policy: invalid`,
+		},
+		{
+			name:             "Signature policy and channel config policy both specified",
+			collectionConfig: sampleCollectionConfigBadSignaturePolicyAndChannelConfigPolicy,
+			expectedErr:      `invalid endorsement policy [&chaincode.endorsementPolicy{ChannelConfigPolicy:"/Channel/Application/Endorsement", SignaturePolicy:"OR('A.member', 'B.member')"}]: cannot specify both "--signature-policy" and "--channel-config-policy"`,
+		},
+	}
+
+	for _, test := range failureTests {
+		t.Run(test.name, func(t *testing.T) {
+			ccp, ccpBytes, err = getCollectionConfigFromBytes([]byte(test.collectionConfig))
+			assert.EqualError(t, err, test.expectedErr)
+			assert.Nil(t, ccp)
+			assert.Nil(t, ccpBytes)
+		})
+	}
 }
 
 func TestValidatePeerConnectionParams(t *testing.T) {
@@ -332,11 +480,14 @@ func TestInitCmdFactoryFailures(t *testing.T) {
 	defer resetFlags()
 	assert := assert.New(t)
 
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.Nil(err)
+
 	// failure validating peer connection parameters
 	resetFlags()
 	peerAddresses = []string{"peer0", "peer1"}
 	tlsRootCertFiles = []string{"cert0", "cert1"}
-	cf, err := InitCmdFactory("query", true, false)
+	cf, err := InitCmdFactory("query", true, false, cryptoProvider)
 	assert.Error(err)
 	assert.Contains(err.Error(), "error validating peer connection parameters: 'query' command can only be executed against one peer")
 	assert.Nil(cf)
@@ -344,7 +495,7 @@ func TestInitCmdFactoryFailures(t *testing.T) {
 	// failure - no peers supplied and endorser client is needed
 	resetFlags()
 	peerAddresses = []string{}
-	cf, err = InitCmdFactory("query", true, false)
+	cf, err = InitCmdFactory("query", true, false, cryptoProvider)
 	assert.Error(err)
 	assert.Contains(err.Error(), "no endorser clients retrieved")
 	assert.Nil(cf)
@@ -353,7 +504,7 @@ func TestInitCmdFactoryFailures(t *testing.T) {
 	// endorser client supplied
 	resetFlags()
 	peerAddresses = nil
-	cf, err = InitCmdFactory("invoke", false, true)
+	cf, err = InitCmdFactory("invoke", false, true, cryptoProvider)
 	assert.Error(err)
 	assert.Contains(err.Error(), "no ordering endpoint or endorser client supplied")
 	assert.Nil(cf)

@@ -9,12 +9,13 @@ package kvledger
 import (
 	"testing"
 
+	"github.com/hyperledger/fabric-protos-go/ledger/queryresult"
+	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/ledger/testutil"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/protos/ledger/queryresult"
-	"github.com/hyperledger/fabric/protos/ledger/rwset/kvrwset"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -26,12 +27,16 @@ func TestStateListener(t *testing.T) {
 	channelid := "testLedger"
 	namespace := "testchaincode"
 	mockListener := &mockStateListener{namespace: namespace}
+
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	provider, err := NewProvider(
 		&ledger.Initializer{
 			DeployedChaincodeInfoProvider: &mock.DeployedChaincodeInfoProvider{},
 			StateListeners:                []ledger.StateListener{mockListener},
 			MetricsProvider:               &disabled.Provider{},
 			Config:                        conf,
+			HashProvider:                  cryptoProvider,
 		},
 	)
 	if err != nil {
@@ -40,6 +45,7 @@ func TestStateListener(t *testing.T) {
 
 	bg, gb := testutil.NewBlockGenerator(t, channelid, false)
 	lgr, err := provider.Create(gb)
+	assert.NoError(t, err)
 	// Simulate tx1
 	sim1, err := lgr.NewTxSimulator("test_tx_1")
 	assert.NoError(t, err)
@@ -61,7 +67,7 @@ func TestStateListener(t *testing.T) {
 	sim3.SetState(namespace, "key4", []byte("value4"))
 	sim3.Done()
 
-	// commit tx1 and this should cause mock listener to recieve the state changes made by tx1
+	// commit tx1 and this should cause mock listener to receive the state changes made by tx1
 	mockListener.reset()
 	sim1Res, _ := sim1.GetTxSimulationResults()
 	sim1ResBytes, _ := sim1Res.GetPubSimulationBytes()
@@ -71,7 +77,7 @@ func TestStateListener(t *testing.T) {
 	assert.Equal(t, channelid, mockListener.channelName)
 	assert.Contains(t, mockListener.kvWrites, &kvrwset.KVWrite{Key: "key1", Value: []byte("value1")})
 	assert.Contains(t, mockListener.kvWrites, &kvrwset.KVWrite{Key: "key2", Value: []byte("value2")})
-	// commit tx2 and this should not cause mock listener to recieve the state changes made by tx2
+	// commit tx2 and this should not cause mock listener to receive the state changes made by tx2
 	// (because, tx2 should be found as invalid)
 	mockListener.reset()
 	sim2Res, _ := sim2.GetTxSimulationResults()
@@ -82,7 +88,7 @@ func TestStateListener(t *testing.T) {
 	assert.Equal(t, "", mockListener.channelName)
 	assert.Nil(t, mockListener.kvWrites)
 
-	// commit tx3 and this should cause mock listener to recieve changes made by tx3
+	// commit tx3 and this should cause mock listener to receive changes made by tx3
 	mockListener.reset()
 	sim3Res, _ := sim3.GetTxSimulationResults()
 	sim3ResBytes, _ := sim3Res.GetPubSimulationBytes()
@@ -95,12 +101,14 @@ func TestStateListener(t *testing.T) {
 	}, mockListener.kvWrites)
 
 	provider.Close()
+
 	provider, err = NewProvider(
 		&ledger.Initializer{
 			DeployedChaincodeInfoProvider: &mock.DeployedChaincodeInfoProvider{},
 			StateListeners:                []ledger.StateListener{mockListener},
 			MetricsProvider:               &disabled.Provider{},
 			Config:                        conf,
+			HashProvider:                  cryptoProvider,
 		},
 	)
 	if err != nil {
@@ -138,6 +146,10 @@ type mockStateListener struct {
 	namespace                    string
 	kvWrites                     []*kvrwset.KVWrite
 	queryResultsInInitializeFunc []*queryresult.KV
+}
+
+func (l *mockStateListener) Name() string {
+	return "mock state listener"
 }
 
 func (l *mockStateListener) Initialize(ledgerID string, qe ledger.SimpleQueryExecutor) error {

@@ -7,12 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 package persistence_test
 
 import (
-	"encoding/json"
 	"io/ioutil"
 
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
 	"github.com/hyperledger/fabric/core/chaincode/persistence/mock"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
@@ -39,7 +38,7 @@ var _ = Describe("FallbackPackageLocator", func() {
 
 	Describe("GetChaincodePackage", func() {
 		It("gets the chaincode package metadata and stream", func() {
-			md, stream, err := fpl.GetChaincodePackage("good-package")
+			md, mdBytes, stream, err := fpl.GetChaincodePackage("good-package")
 			Expect(err).NotTo(HaveOccurred())
 			defer stream.Close()
 			Expect(md).To(Equal(&persistence.ChaincodePackageMetadata{
@@ -47,6 +46,7 @@ var _ = Describe("FallbackPackageLocator", func() {
 				Path:  "Fake-Path",
 				Label: "Real-Label",
 			}))
+			Expect(mdBytes).To(MatchJSON(`{"type":"Fake-Type","path":"Fake-Path","label":"Real-Label","extra_field":"extra-field-value"}`))
 			code, err := ioutil.ReadAll(stream)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(code).To(Equal([]byte("package")))
@@ -55,14 +55,14 @@ var _ = Describe("FallbackPackageLocator", func() {
 
 		Context("when the package has bad metadata", func() {
 			It("wraps and returns the error", func() {
-				_, _, err := fpl.GetChaincodePackage("bad-metadata")
+				_, _, _, err := fpl.GetChaincodePackage("bad-metadata")
 				Expect(err).To(MatchError(ContainSubstring("error retrieving chaincode package metadata 'bad-metadata'")))
 			})
 		})
 
 		Context("when the package has bad code", func() {
 			It("wraps and returns the error", func() {
-				_, _, err := fpl.GetChaincodePackage("missing-codepackage")
+				_, _, _, err := fpl.GetChaincodePackage("missing-codepackage")
 				Expect(err).To(MatchError(ContainSubstring("error retrieving chaincode package code 'missing-codepackage'")))
 			})
 		})
@@ -83,13 +83,14 @@ var _ = Describe("FallbackPackageLocator", func() {
 			})
 
 			It("falls back to the legacy retriever", func() {
-				md, stream, err := fpl.GetChaincodePackage("legacy-package")
+				md, mdBytes, stream, err := fpl.GetChaincodePackage("legacy-package")
 				Expect(err).NotTo(HaveOccurred())
 				defer stream.Close()
 				Expect(md).To(Equal(&persistence.ChaincodePackageMetadata{
 					Path: "legacy-path",
 					Type: "GOLANG",
 				}))
+				Expect(mdBytes).To(MatchJSON(`{"type":"GOLANG","path":"legacy-path","label":""}`))
 				code, err := ioutil.ReadAll(stream)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(code).To(Equal([]byte("legacy-code")))
@@ -101,7 +102,7 @@ var _ = Describe("FallbackPackageLocator", func() {
 				})
 
 				It("wraps and returns the error", func() {
-					_, _, err := fpl.GetChaincodePackage("legacy-package")
+					_, _, _, err := fpl.GetChaincodePackage("legacy-package")
 					Expect(err).To(MatchError("could not get legacy chaincode package 'legacy-package': fake-error"))
 				})
 			})
@@ -158,8 +159,7 @@ var _ = Describe("ChaincodePackageParser", func() {
 
 				ccPackage, err := ccpp.Parse(data)
 				Expect(ccPackage).To(BeNil())
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("error retrieving DB artifacts from code package"))
+				Expect(err).To(MatchError(ContainSubstring("error retrieving DB artifacts from code package")))
 			})
 		})
 
@@ -396,18 +396,5 @@ var _ = Describe("ChaincodePackageStreamer", func() {
 				Expect(err).To(MatchError("error reading as gzip stream: unexpected EOF"))
 			})
 		})
-	})
-})
-
-var _ = Describe("ChaincodePackageMetadata", func() {
-	It("works around upper case keys by unmarshaling in a case insensitive way", func() {
-		md := persistence.ChaincodePackageMetadata{}
-		err := json.Unmarshal([]byte(`{"Type": "fake-type", "Label": "fake-label", "Path": "fake-path"}`), &md)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(md).To(Equal(persistence.ChaincodePackageMetadata{
-			Type:  "fake-type",
-			Path:  "fake-path",
-			Label: "fake-label",
-		}))
 	})
 })

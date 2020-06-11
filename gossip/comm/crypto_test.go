@@ -14,15 +14,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"math/big"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/util"
-	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -47,7 +46,7 @@ func createTestServer(t *testing.T, cert *tls.Certificate) (srv *gossipTestServe
 		InsecureSkipVerify: true,
 	}
 	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConf)))
-	ll, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	ll, err := net.Listen("tcp", "127.0.0.1:0")
 	assert.NoError(t, err, "%v", err)
 
 	srv = &gossipTestServer{s: s, ll: ll, selfCertHash: certHashFromRawCert(cert.Certificate[0])}

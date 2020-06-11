@@ -1,5 +1,6 @@
 /*
 Copyright IBM Corp. All Rights Reserved.
+
 SPDX-License-Identifier: Apache-2.0
 */
 
@@ -9,22 +10,28 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hyperledger/fabric-protos-go/common"
+	protopeer "github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/protos/common"
-	protopeer "github.com/hyperledger/fabric/protos/peer"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestReadWriteCustomTxProcessor(t *testing.T) {
 	fakeTxProcessor := &mock.CustomTxProcessor{}
+
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+
 	env := newEnvWithInitializer(
 		t,
 		&ledgermgmt.Initializer{
 			CustomTxProcessors: map[common.HeaderType]ledger.CustomTxProcessor{
 				100: fakeTxProcessor,
 			},
+			HashProvider: cryptoProvider,
 		},
 	)
 	defer env.cleanup()
@@ -65,6 +72,10 @@ func TestRangeReadAndWriteCustomTxProcessor(t *testing.T) {
 	fakeTxProcessor1 := &mock.CustomTxProcessor{}
 	fakeTxProcessor2 := &mock.CustomTxProcessor{}
 	fakeTxProcessor3 := &mock.CustomTxProcessor{}
+
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+
 	env := newEnvWithInitializer(
 		t,
 		&ledgermgmt.Initializer{
@@ -73,6 +84,7 @@ func TestRangeReadAndWriteCustomTxProcessor(t *testing.T) {
 				102: fakeTxProcessor2,
 				103: fakeTxProcessor3,
 			},
+			HashProvider: cryptoProvider,
 		},
 	)
 	defer env.cleanup()

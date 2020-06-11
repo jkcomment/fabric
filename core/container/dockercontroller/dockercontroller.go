@@ -22,12 +22,12 @@ import (
 	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/core/container/ccintf"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/pkg/errors"
 )
 
@@ -37,7 +37,7 @@ var (
 	imageRegExp  = regexp.MustCompile("^[a-z0-9]+(([._-][a-z0-9]+)+)?$")
 )
 
-//go:generate counterfeiter -o mock/dockerclient.go --fake-name DockerClient dockerClient
+//go:generate counterfeiter -o mock/dockerclient.go --fake-name DockerClient . dockerClient
 
 // dockerClient represents a docker client
 type dockerClient interface {
@@ -86,6 +86,10 @@ func (ci *ContainerInstance) Start(peerConnection *ccintf.PeerConnection) error 
 	return ci.DockerVM.Start(ci.CCID, ci.Type, peerConnection)
 }
 
+func (ci *ContainerInstance) ChaincodeServerInfo() (*ccintf.ChaincodeServerInfo, error) {
+	return nil, nil
+}
+
 func (ci *ContainerInstance) Stop() error {
 	return ci.DockerVM.Stop(ci.CCID)
 }
@@ -106,6 +110,7 @@ type DockerVM struct {
 	NetworkMode     string
 	PlatformBuilder PlatformBuilder
 	LoggingEnv      []string
+	MSPID           string
 }
 
 // HealthCheck checks if the DockerVM is able to communicate with the Docker
@@ -206,6 +211,19 @@ func (vm *DockerVM) Build(ccid string, metadata *persistence.ChaincodePackageMet
 	}, nil
 }
 
+// In order to support starting chaincode containers built with Fabric v1.4 and earlier,
+// we must check for the precense of the start.sh script for Node.js chaincode before
+// attempting to call it.
+var nodeStartScript = `
+set -e
+if [ -x /chaincode/start.sh ]; then
+	/chaincode/start.sh --peer.address %[1]s
+else
+	cd /usr/local/src
+	npm start -- --peer.address %[1]s
+fi
+`
+
 func (vm *DockerVM) GetArgs(ccType string, peerAddress string) ([]string, error) {
 	// language specific arguments, possibly should be pushed back into platforms, but were simply
 	// ported from the container_runtime chaincode component
@@ -215,7 +233,7 @@ func (vm *DockerVM) GetArgs(ccType string, peerAddress string) ([]string, error)
 	case pb.ChaincodeSpec_JAVA.String():
 		return []string{"/root/chaincode-java/start", "--peerAddress", peerAddress}, nil
 	case pb.ChaincodeSpec_NODE.String():
-		return []string{"/bin/sh", "-c", fmt.Sprintf("cd /usr/local/src; npm start -- --peer.address %s", peerAddress)}, nil
+		return []string{"/bin/sh", "-c", fmt.Sprintf(nodeStartScript, peerAddress)}, nil
 	default:
 		return nil, errors.Errorf("unknown chaincodeType: %s", ccType)
 	}
@@ -225,7 +243,9 @@ const (
 	// Mutual TLS auth client key and cert paths in the chaincode container
 	TLSClientKeyPath      string = "/etc/hyperledger/fabric/client.key"
 	TLSClientCertPath     string = "/etc/hyperledger/fabric/client.crt"
-	TLSClientRootCertPath string = "/etc/hyperledger/fabric/peer.crt"
+	TLSClientKeyFile      string = "/etc/hyperledger/fabric/client_pem.key"
+	TLSClientCertFile     string = "/etc/hyperledger/fabric/client_pem.crt"
+	TLSClientRootCertFile string = "/etc/hyperledger/fabric/peer.crt"
 )
 
 func (vm *DockerVM) GetEnv(ccid string, tlsConfig *ccintf.TLSConfig) []string {
@@ -235,7 +255,7 @@ func (vm *DockerVM) GetEnv(ccid string, tlsConfig *ccintf.TLSConfig) []string {
 	// same but now they are not, so we should use a different env
 	// variable. However chaincodes built by older versions of the
 	// peer still adopt this broken convention. (FAB-14630)
-	envs := []string{"CORE_CHAINCODE_ID_NAME=" + string(ccid)}
+	envs := []string{fmt.Sprintf("CORE_CHAINCODE_ID_NAME=%s", ccid)}
 	envs = append(envs, vm.LoggingEnv...)
 
 	// Pass TLS options to chaincode
@@ -243,13 +263,16 @@ func (vm *DockerVM) GetEnv(ccid string, tlsConfig *ccintf.TLSConfig) []string {
 		envs = append(envs, "CORE_PEER_TLS_ENABLED=true")
 		envs = append(envs, fmt.Sprintf("CORE_TLS_CLIENT_KEY_PATH=%s", TLSClientKeyPath))
 		envs = append(envs, fmt.Sprintf("CORE_TLS_CLIENT_CERT_PATH=%s", TLSClientCertPath))
-		envs = append(envs, fmt.Sprintf("CORE_PEER_TLS_ROOTCERT_FILE=%s", TLSClientRootCertPath))
+		envs = append(envs, fmt.Sprintf("CORE_TLS_CLIENT_KEY_FILE=%s", TLSClientKeyFile))
+		envs = append(envs, fmt.Sprintf("CORE_TLS_CLIENT_CERT_FILE=%s", TLSClientCertFile))
+		envs = append(envs, fmt.Sprintf("CORE_PEER_TLS_ROOTCERT_FILE=%s", TLSClientRootCertFile))
 	} else {
 		envs = append(envs, "CORE_PEER_TLS_ENABLED=false")
 	}
 
-	return envs
+	envs = append(envs, fmt.Sprintf("CORE_PEER_LOCALMSPID=%s", vm.MSPID))
 
+	return envs
 }
 
 // Start starts a container using a previously created docker image
@@ -297,7 +320,9 @@ func (vm *DockerVM) Start(ccid string, ccType string, peerConnection *ccintf.Pee
 		err = addFiles(tw, map[string][]byte{
 			TLSClientKeyPath:      []byte(base64.StdEncoding.EncodeToString(peerConnection.TLSConfig.ClientKey)),
 			TLSClientCertPath:     []byte(base64.StdEncoding.EncodeToString(peerConnection.TLSConfig.ClientCert)),
-			TLSClientRootCertPath: peerConnection.TLSConfig.RootCert,
+			TLSClientKeyFile:      peerConnection.TLSConfig.ClientKey,
+			TLSClientCertFile:     peerConnection.TLSConfig.ClientCert,
+			TLSClientRootCertFile: peerConnection.TLSConfig.RootCert,
 		})
 		if err != nil {
 			return fmt.Errorf("error writing files to upload to Docker instance into a temporary tar blob: %s", err)
@@ -397,9 +422,11 @@ func streamOutput(logger *flogging.FabricLogger, client dockerClient, containerN
 			// Loop forever dumping lines of text into the containerLogger
 			// until the pipe is closed
 			line, err := is.ReadString('\n')
+			if len(line) > 0 {
+				containerLogger.Info(line)
+			}
 			switch err {
 			case nil:
-				containerLogger.Info(line)
 			case io.EOF:
 				logger.Infof("Container %s has closed its IO channel", containerName)
 				return
@@ -461,6 +488,9 @@ func (vm *DockerVM) GetVMName(ccid string) string {
 // uniqueness.
 func (vm *DockerVM) GetVMNameForDocker(ccid string) (string, error) {
 	name := vm.preFormatImageName(ccid)
+	// pre-2.0 used "-" as the separator in the ccid, so replace ":" with
+	// "-" here to ensure 2.0 peers can find pre-2.0 cc images
+	name = strings.ReplaceAll(name, ":", "-")
 	hash := hex.EncodeToString(util.ComputeSHA256([]byte(name)))
 	saniName := vmRegExp.ReplaceAllString(name, "-")
 	imageName := strings.ToLower(fmt.Sprintf("%s-%s", saniName, hash))

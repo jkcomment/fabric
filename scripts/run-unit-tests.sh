@@ -4,8 +4,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-set -e
-set -o pipefail
+set -eo pipefail
+
+base_dir="$(cd "$(dirname "$0")/.." && pwd)"
 
 # regexes for packages to exclude from unit test
 excluded_packages=(
@@ -17,12 +18,10 @@ serial_packages=(
     "github.com/hyperledger/fabric/gossip/..."
 )
 
-# packages which need to be tested with build tag pluginsenabled
-plugin_packages=()
-
 # packages which need to be tested with build tag pkcs11
 pkcs11_packages=(
-    "github.com/hyperledger/fabric/bccsp/..."
+    "github.com/hyperledger/fabric/bccsp/factory"
+    "github.com/hyperledger/fabric/bccsp/pkcs11"
 )
 
 # packages that are only tested when they (or their deps) change
@@ -33,7 +32,8 @@ conditional_packages=(
 # join array elements by the specified string
 join_by() {
     local IFS="$1"; shift
-    [ "$#" -ne 0 ] && echo "$*"
+    [ "$#" -eq 0 ] && return 0
+    echo "$*"
 }
 
 contains_element() {
@@ -55,7 +55,7 @@ package_filter() {
 
 # obtain packages changed since some git refspec
 packages_diff() {
-    git -C "${GOPATH}/src/github.com/hyperledger/fabric" diff --no-commit-id --name-only -r "${1:-HEAD}" |
+    git -C "${base_dir}" diff --no-commit-id --name-only -r "${1:-HEAD}" |
         (grep '.go$' || true) | \
         sed 's%/[^/]*$%%' | sort -u | \
         awk '{print "github.com/hyperledger/fabric/"$1}'
@@ -66,10 +66,10 @@ changed_packages() {
     local -a changed
 
     # first check for uncommitted changes
-    while IFS= read -r pkg; do changed+=("$pkg"); done < <(packages_diff HEAD | grep -Ev '/vendor(/|$)' || true)
+    while IFS= read -r pkg; do changed+=("$pkg"); done < <(packages_diff HEAD)
     if [ "${#changed[@]}" -eq 0 ]; then
         # next check for changes in the latest commit
-        while IFS= read -r pkg; do changed+=("$pkg"); done < <(packages_diff HEAD^ | grep -Ev '/vendor(/|$)' || true)
+        while IFS= read -r pkg; do changed+=("$pkg"); done < <(packages_diff HEAD^)
     fi
 
     join_by $'\n' "${changed[@]}"
@@ -128,8 +128,6 @@ serial_test_packages() {
     filter=$(package_filter "${serial_packages[@]}")
     if [ -n "$filter" ]; then
         join_by $'\n' "$@" | grep -E "$filter" || true
-    else
-        join_by $'\n' "$@"
     fi
 }
 
@@ -154,7 +152,7 @@ run_tests() {
         local -a serial
         while IFS= read -r pkg; do serial+=("$pkg"); done < <(serial_test_packages "$@")
         if [ "${#serial[@]}" -ne 0 ]; then
-            go test "${flags[@]}" -tags "$GO_TAGS" "${serial[@]}" -short -p 1 -timeout=20m
+            go test "${flags[@]}" -failfast -tags "$GO_TAGS" "${serial[@]}" -short -p 1 -timeout=20m
         fi
 
         local -a parallel
@@ -173,16 +171,6 @@ run_tests_with_coverage() {
 }
 
 main() {
-    # place the cache directory into the default build tree if it exists
-    if [ -d "${GOPATH}/src/github.com/hyperledger/fabric/.build" ]; then
-        export GOCACHE="${GOPATH}/src/github.com/hyperledger/fabric/.build/go-cache"
-    fi
-
-    # explicit exclusions for ppc and s390x
-    if [ "$(uname -m)" == "ppc64le" ] || [ "$(uname -m)" == "s390x" ]; then
-        excluded_packages+=("github.com/hyperledger/fabric/core/chaincode/platforms/java")
-    fi
-
     # default behavior is to run all tests
     local -a package_spec=("${TEST_PKGS:-github.com/hyperledger/fabric/...}")
 
@@ -198,11 +186,10 @@ main() {
     fi
 
     # expand the package specs into arrays of packages
-    local -a candidates packages packages_with_plugins packages_with_pkcs11
+    local -a candidates packages packages_with_pkcs11
     while IFS= read -r pkg; do candidates+=("$pkg"); done < <(go list "${package_spec[@]}")
     while IFS= read -r pkg; do packages+=("$pkg"); done < <(list_and_filter "${package_spec[@]}")
     while IFS= read -r pkg; do contains_element "$pkg" "${candidates[@]}" && packages+=("$pkg"); done < <(list_changed_conditional)
-    while IFS= read -r pkg; do contains_element "$pkg" "${packages[@]}" && packages_with_plugins+=("$pkg"); done < <(list_and_filter "${plugin_packages[@]}")
     while IFS= read -r pkg; do contains_element "$pkg" "${packages[@]}" && packages_with_pkcs11+=("$pkg"); done < <(list_and_filter "${pkcs11_packages[@]}")
 
     local all_packages=( "${packages[@]}" "${packages_with_pkcs11[@]}" "${packages_with_pkcs11[@]}" )
@@ -211,12 +198,10 @@ main() {
     elif [ "${JOB_TYPE}" = "PROFILE" ]; then
         echo "mode: set" > profile.cov
         [ "${#packages}" -eq 0 ] || run_tests_with_coverage "${packages[@]}"
-        [ "${#packages_with_plugins}" -eq 0 ] || GO_TAGS="${GO_TAGS} pluginsenabled" run_tests_with_coverage "${packages_with_plugins[@]}"
         [ "${#packages_with_pkcs11}" -eq 0 ] || GO_TAGS="${GO_TAGS} pkcs11" run_tests_with_coverage "${packages_with_pkcs11[@]}"
         gocov convert profile.cov | gocov-xml > report.xml
     else
         [ "${#packages}" -eq 0 ] || run_tests "${packages[@]}"
-        [ "${#packages_with_plugins}" -eq 0 ] || GO_TAGS="${GO_TAGS} pluginsenabled" run_tests "${packages_with_plugins[@]}"
         [ "${#packages_with_pkcs11}" -eq 0 ] || GO_TAGS="${GO_TAGS} pkcs11" run_tests "${packages_with_pkcs11[@]}"
     fi
 }

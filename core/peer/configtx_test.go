@@ -12,16 +12,16 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/common/capabilities"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	configtxtest "github.com/hyperledger/fabric/common/configtx/test"
 	"github.com/hyperledger/fabric/common/ledger/testutil"
+	"github.com/hyperledger/fabric/core/config/configtest"
 	"github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/internal/configtxgen/configtxgentest"
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
-	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,6 +52,22 @@ func TestConfigTxCreateLedger(t *testing.T) {
 	retrievedchanConf, err := retrievePersistedChannelConfig(ledger)
 	assert.NoError(t, err)
 	assert.Equal(t, proto.CompactTextString(chanConf), proto.CompactTextString(retrievedchanConf))
+}
+
+func TestConfigTxErrorScenarios(t *testing.T) {
+	configTxProcessor := &ConfigTxProcessor{}
+	// wrong tx type
+	configEnvWrongTxType := &common.ConfigEnvelope{}
+	txEnvelope, err := protoutil.CreateSignedEnvelope(common.HeaderType_PEER_ADMIN_OPERATION, "channelID", nil, configEnvWrongTxType, 0, 0)
+	require.NoError(t, err)
+	err = configTxProcessor.GenerateSimulationResults(txEnvelope, nil, false)
+	require.EqualError(t, err, "tx type [PEER_ADMIN_OPERATION] is not expected")
+
+	// empty channelConfig
+	txEnvelope, err = protoutil.CreateSignedEnvelope(common.HeaderType_CONFIG, "channelID", nil, &common.ConfigEnvelope{}, 0, 0)
+	require.NoError(t, err)
+	err = configTxProcessor.GenerateSimulationResults(txEnvelope, nil, false)
+	require.EqualError(t, err, "channel config found nil")
 }
 
 func TestConfigTxUpdateChanConfig(t *testing.T) {
@@ -136,7 +152,7 @@ func newTestHelper(t *testing.T) *testHelper {
 }
 
 func (h *testHelper) sampleChannelConfig(sequence uint64, enableV11Capability bool) *common.Config {
-	profile := configtxgentest.Load(genesisconfig.SampleDevModeSoloProfile)
+	profile := genesisconfig.Load(genesisconfig.SampleDevModeSoloProfile, configtest.GetDevConfigDir())
 	if enableV11Capability {
 		profile.Orderer.Capabilities = make(map[string]bool)
 		profile.Orderer.Capabilities[capabilities.ApplicationV1_1] = true

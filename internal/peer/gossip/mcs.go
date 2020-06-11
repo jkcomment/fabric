@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	pcommon "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/policies"
@@ -20,7 +21,6 @@ import (
 	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
-	pcommon "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
@@ -96,7 +96,7 @@ func (s *MSPMessageCryptoService) GetPKIidOfCert(peerIdentity api.PeerIdentityTy
 
 	sid, err := s.deserializer.Deserialize(peerIdentity)
 	if err != nil {
-		mcsLogger.Errorf("Failed getting validated identity from peer identity [% x]: [%s]", peerIdentity, err)
+		mcsLogger.Errorf("Failed getting validated identity from peer identity %s: [%s]", peerIdentity, err)
 
 		return nil
 	}
@@ -111,7 +111,7 @@ func (s *MSPMessageCryptoService) GetPKIidOfCert(peerIdentity api.PeerIdentityTy
 	// Hash
 	digest, err := s.hasher.Hash(raw, &bccsp.SHA256Opts{})
 	if err != nil {
-		mcsLogger.Errorf("Failed computing digest of serialized identity [% x]: [%s]", peerIdentity, err)
+		mcsLogger.Errorf("Failed computing digest of serialized identity %s: [%s]", peerIdentity, err)
 		return nil
 	}
 
@@ -121,13 +121,7 @@ func (s *MSPMessageCryptoService) GetPKIidOfCert(peerIdentity api.PeerIdentityTy
 // VerifyBlock returns nil if the block is properly signed, and the claimed seqNum is the
 // sequence number that the block's header contains.
 // else returns error
-func (s *MSPMessageCryptoService) VerifyBlock(chainID common.ChannelID, seqNum uint64, signedBlock []byte) error {
-	// - Convert signedBlock to common.Block.
-	block, err := protoutil.UnmarshalBlock(signedBlock)
-	if err != nil {
-		return fmt.Errorf("Failed unmarshalling block bytes on channel [%s]: [%s]", chainID, err)
-	}
-
+func (s *MSPMessageCryptoService) VerifyBlock(chainID common.ChannelID, seqNum uint64, block *pcommon.Block) error {
 	if block.Header == nil {
 		return fmt.Errorf("Invalid Block on channel [%s]. Header must be different from nil.", chainID)
 	}
@@ -138,7 +132,7 @@ func (s *MSPMessageCryptoService) VerifyBlock(chainID common.ChannelID, seqNum u
 	}
 
 	// - Extract channelID and compare with chainID
-	channelID, err := protoutil.GetChainIDFromBlock(block)
+	channelID, err := protoutil.GetChannelIDFromBlock(block)
 	if err != nil {
 		return fmt.Errorf("Failed getting channel id from block with id [%d] on channel [%s]: [%s]", block.Header.Number, chainID, err)
 	}
@@ -195,7 +189,7 @@ func (s *MSPMessageCryptoService) VerifyBlock(chainID common.ChannelID, seqNum u
 	}
 
 	// - Evaluate policy
-	return policy.Evaluate(signatureSet)
+	return policy.EvaluateSignedData(signatureSet)
 }
 
 // Sign signs msg with this peer's signing key and outputs
@@ -250,7 +244,7 @@ func (s *MSPMessageCryptoService) VerifyByChannel(chainID common.ChannelID, peer
 	policy, flag := cpm.GetPolicy(policies.ChannelApplicationReaders)
 	mcsLogger.Debugf("Got reader policy for channel [%s] with flag [%t]", string(chainID), flag)
 
-	return policy.Evaluate(
+	return policy.EvaluateSignedData(
 		[]*protoutil.SignedData{{
 			Data:      message,
 			Identity:  []byte(peerIdentity),
@@ -318,7 +312,7 @@ func (s *MSPMessageCryptoService) getValidatedIdentity(peerIdentity api.PeerIden
 		// Deserialize identity
 		identity, err := mspManager.DeserializeIdentity([]byte(peerIdentity))
 		if err != nil {
-			mcsLogger.Debugf("Failed deserialization identity [% x] on [%s]: [%s]", peerIdentity, chainID, err)
+			mcsLogger.Debugf("Failed deserialization identity %s on [%s]: [%s]", peerIdentity, chainID, err)
 			continue
 		}
 
@@ -333,14 +327,14 @@ func (s *MSPMessageCryptoService) getValidatedIdentity(peerIdentity api.PeerIden
 		// This will be done by the caller function, if needed.
 
 		if err := identity.Validate(); err != nil {
-			mcsLogger.Debugf("Failed validating identity [% x] on [%s]: [%s]", peerIdentity, chainID, err)
+			mcsLogger.Debugf("Failed validating identity %s on [%s]: [%s]", peerIdentity, chainID, err)
 			continue
 		}
 
-		mcsLogger.Debugf("Validation succeeded [% x] on [%s]", peerIdentity, chainID)
+		mcsLogger.Debugf("Validation succeeded %s on [%s]", peerIdentity, chainID)
 
 		return identity, common.ChannelID(chainID), nil
 	}
 
-	return nil, nil, fmt.Errorf("Peer Identity [% x] cannot be validated. No MSP found able to do that.", peerIdentity)
+	return nil, nil, fmt.Errorf("Peer Identity %s cannot be validated. No MSP found able to do that.", peerIdentity)
 }

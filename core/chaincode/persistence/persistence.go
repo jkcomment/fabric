@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/hyperledger/fabric/common/chaincode"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -188,6 +189,14 @@ func (s *Store) Load(packageID string) ([]byte, error) {
 	return ccInstallPkg, nil
 }
 
+// Delete deletes a persisted chaincode.  Note, there is no locking,
+// so this should only be performed if the chaincode has already
+// been marked built.
+func (s *Store) Delete(packageID string) error {
+	ccInstallPkgPath := filepath.Join(s.Path, CCFileName(packageID))
+	return s.ReadWriter.Remove(ccInstallPkgPath)
+}
+
 // CodePackageNotFoundErr is the error returned when a code package cannot
 // be found in the persistence store
 type CodePackageNotFoundErr struct {
@@ -226,10 +235,10 @@ func packageID(label string, hash []byte) string {
 }
 
 func CCFileName(packageID string) string {
-	return packageID + ".tar.gz"
+	return strings.Replace(packageID, ":", ".", 1) + ".tar.gz"
 }
 
-var packageFileMatcher = regexp.MustCompile("^(.+):([0-9abcdef]+)[.]tar[.]gz$")
+var packageFileMatcher = regexp.MustCompile("^(.+)[.]([0-9a-f]{64})[.]tar[.]gz$")
 
 func installedChaincodeFromFilename(fileName string) (chaincode.InstalledChaincode, bool) {
 	matches := packageFileMatcher.FindStringSubmatch(fileName)

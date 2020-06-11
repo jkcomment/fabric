@@ -13,8 +13,9 @@ import (
 	"fmt"
 	"sync"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	ab "github.com/hyperledger/fabric-protos-go/orderer"
 	"github.com/hyperledger/fabric/bccsp"
-	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/flogging"
@@ -24,9 +25,8 @@ import (
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
+	"github.com/hyperledger/fabric/orderer/common/types"
 	"github.com/hyperledger/fabric/orderer/consensus"
-	cb "github.com/hyperledger/fabric/protos/common"
-	ab "github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
@@ -107,6 +107,7 @@ type Registrar struct {
 	systemChannel      *ChainSupport
 	templator          msgprocessor.ChannelConfigTemplator
 	callbacks          []channelconfig.BundleActor
+	bccsp              bccsp.BCCSP
 }
 
 // ConfigBlock retrieves the last configuration block from the given ledger.
@@ -135,6 +136,7 @@ func NewRegistrar(
 	ledgerFactory blockledger.Factory,
 	signer identity.SignerSerializer,
 	metricsProvider metrics.Provider,
+	bccsp bccsp.BCCSP,
 	callbacks ...channelconfig.BundleActor,
 ) *Registrar {
 	r := &Registrar{
@@ -144,6 +146,7 @@ func NewRegistrar(
 		signer:             signer,
 		blockcutterMetrics: blockcutter.NewMetrics(metricsProvider),
 		callbacks:          callbacks,
+		bccsp:              bccsp,
 	}
 
 	return r
@@ -151,23 +154,23 @@ func NewRegistrar(
 
 func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 	r.consenters = consenters
-	existingChains := r.ledgerFactory.ChainIDs()
+	existingChannels := r.ledgerFactory.ChannelIDs()
 
-	for _, chainID := range existingChains {
-		rl, err := r.ledgerFactory.GetOrCreate(chainID)
+	for _, channelID := range existingChannels {
+		rl, err := r.ledgerFactory.GetOrCreate(channelID)
 		if err != nil {
-			logger.Panicf("Ledger factory reported chainID %s but could not retrieve it: %s", chainID, err)
+			logger.Panicf("Ledger factory reported channelID %s but could not retrieve it: %s", channelID, err)
 		}
 		configTx := configTx(rl)
 		if configTx == nil {
 			logger.Panic("Programming error, configTx should never be nil here")
 		}
 		ledgerResources := r.newLedgerResources(configTx)
-		chainID := ledgerResources.ConfigtxValidator().ChannelID()
+		channelID := ledgerResources.ConfigtxValidator().ChannelID()
 
 		if _, ok := ledgerResources.ConsortiumsConfig(); ok {
 			if r.systemChannelID != "" {
-				logger.Panicf("There appear to be two system chains %s and %s", r.systemChannelID, chainID)
+				logger.Panicf("There appear to be two system channels %s and %s", r.systemChannelID, channelID)
 			}
 
 			chain := newChainSupport(
@@ -176,55 +179,67 @@ func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 				r.consenters,
 				r.signer,
 				r.blockcutterMetrics,
+				r.bccsp,
 			)
-			r.templator = msgprocessor.NewDefaultTemplator(chain)
+			r.templator = msgprocessor.NewDefaultTemplator(chain, r.bccsp)
 			chain.Processor = msgprocessor.NewSystemChannel(
 				chain,
 				r.templator,
 				msgprocessor.CreateSystemChannelFilters(r.config, r, chain, chain.MetadataValidator),
+				r.bccsp,
 			)
 
 			// Retrieve genesis block to log its hash. See FAB-5450 for the purpose
 			iter, pos := rl.Iterator(&ab.SeekPosition{Type: &ab.SeekPosition_Oldest{Oldest: &ab.SeekOldest{}}})
 			defer iter.Close()
 			if pos != uint64(0) {
-				logger.Panicf("Error iterating over system channel: '%s', expected position 0, got %d", chainID, pos)
+				logger.Panicf("Error iterating over system channel: '%s', expected position 0, got %d", channelID, pos)
 			}
 			genesisBlock, status := iter.Next()
 			if status != cb.Status_SUCCESS {
-				logger.Panicf("Error reading genesis block of system channel '%s'", chainID)
+				logger.Panicf("Error reading genesis block of system channel '%s'", channelID)
 			}
 			logger.Infof("Starting system channel '%s' with genesis block hash %x and orderer type %s",
-				chainID, protoutil.BlockHeaderHash(genesisBlock.Header), chain.SharedConfig().ConsensusType())
+				channelID, protoutil.BlockHeaderHash(genesisBlock.Header), chain.SharedConfig().ConsensusType())
 
-			r.chains[chainID] = chain
-			r.systemChannelID = chainID
+			r.chains[channelID] = chain
+			r.systemChannelID = channelID
 			r.systemChannel = chain
-			// We delay starting this chain, as it might try to copy and replace the chains map via newChain before the map is fully built
+			// We delay starting this channel, as it might try to copy and replace the channels map via newChannel before the map is fully built
 			defer chain.start()
 		} else {
-			logger.Debugf("Starting chain: %s", chainID)
+			logger.Debugf("Starting channel: %s", channelID)
 			chain := newChainSupport(
 				r,
 				ledgerResources,
 				r.consenters,
 				r.signer,
 				r.blockcutterMetrics,
+				r.bccsp,
 			)
-			r.chains[chainID] = chain
+			r.chains[channelID] = chain
 			chain.start()
 		}
 
 	}
 
 	if r.systemChannelID == "" {
-		logger.Panicf("No system chain found.  If bootstrapping, does your system channel contain a consortiums group definition?")
+		logger.Warning("registrar initializing without a system channel")
 	}
 }
 
 // SystemChannelID returns the ChannelID for the system channel.
 func (r *Registrar) SystemChannelID() string {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
 	return r.systemChannelID
+}
+
+// SystemChannel returns the ChainSupport for the system channel.
+func (r *Registrar) SystemChannel() *ChainSupport {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+	return r.systemChannel
 }
 
 // BroadcastChannelSupport returns the message channel header, whether the message is a config update
@@ -239,7 +254,11 @@ func (r *Registrar) BroadcastChannelSupport(msg *cb.Envelope) (*cb.ChannelHeader
 	cs := r.GetChain(chdr.ChannelId)
 	// New channel creation
 	if cs == nil {
-		cs = r.systemChannel
+		sysChan := r.SystemChannel()
+		if sysChan == nil {
+			return nil, false, nil, errors.New("channel creation request not allowed because the orderer system channel is not defined")
+		}
+		cs = sysChan
 	}
 
 	isConfig := false
@@ -282,7 +301,7 @@ func (r *Registrar) newLedgerResources(configTx *cb.Envelope) *ledgerResources {
 		logger.Panicf("Error umarshaling config envelope from payload data: %s", err)
 	}
 
-	bundle, err := channelconfig.NewBundle(chdr.ChannelId, configEnvelope.Config, factory.GetDefault())
+	bundle, err := channelconfig.NewBundle(chdr.ChannelId, configEnvelope.Config, r.bccsp)
 	if err != nil {
 		logger.Panicf("Error creating channelconfig bundle: %s", err)
 	}
@@ -297,7 +316,7 @@ func (r *Registrar) newLedgerResources(configTx *cb.Envelope) *ledgerResources {
 	return &ledgerResources{
 		configResources: &configResources{
 			mutableResources: channelconfig.NewBundleSource(bundle, r.callbacks...),
-			bccsp:            factory.GetDefault(),
+			bccsp:            r.bccsp,
 		},
 		ReadWriter: ledger,
 	}
@@ -334,12 +353,12 @@ func (r *Registrar) newChain(configtx *cb.Envelope) {
 		newChains[key] = value
 	}
 
-	cs := newChainSupport(r, ledgerResources, r.consenters, r.signer, r.blockcutterMetrics)
-	channelID := ledgerResources.ConfigtxValidator().ChannelID()
+	cs := newChainSupport(r, ledgerResources, r.consenters, r.signer, r.blockcutterMetrics, r.bccsp)
+	chainID := ledgerResources.ConfigtxValidator().ChannelID()
 
-	logger.Infof("Created and starting new channel %s", channelID)
+	logger.Infof("Created and starting new channel %s", chainID)
 
-	newChains[string(channelID)] = cs
+	newChains[string(chainID)] = cs
 	cs.start()
 
 	r.chains = newChains
@@ -360,5 +379,70 @@ func (r *Registrar) NewChannelConfig(envConfigUpdate *cb.Envelope) (channelconfi
 
 // CreateBundle calls channelconfig.NewBundle
 func (r *Registrar) CreateBundle(channelID string, config *cb.Config) (channelconfig.Resources, error) {
-	return channelconfig.NewBundle(channelID, config, factory.GetDefault())
+	return channelconfig.NewBundle(channelID, config, r.bccsp)
+}
+
+// ChannelList returns a slice of ChannelInfoShort containing all application channels (excluding the system
+// channel), and ChannelInfoShort of the system channel (nil if does not exist).
+// The URL fields are empty, and are to be completed by the caller.
+func (r *Registrar) ChannelList() types.ChannelList {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	list := types.ChannelList{}
+
+	if len(r.chains) == 0 {
+		return list
+	}
+
+	if r.systemChannelID != "" {
+		list.SystemChannel = &types.ChannelInfoShort{Name: r.systemChannelID}
+	}
+	for name := range r.chains {
+		if name == r.systemChannelID {
+			continue
+		}
+		list.Channels = append(list.Channels, types.ChannelInfoShort{Name: name})
+	}
+
+	return list
+}
+
+func (r *Registrar) ChannelInfo(channelID string) (types.ChannelInfo, error) {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	info := types.ChannelInfo{}
+	cs, ok := r.chains[channelID]
+	if !ok {
+		return info, types.ErrChannelNotExist
+	}
+
+	info.Name = channelID
+	info.Height = cs.Height()
+	info.ClusterRelation, info.Status = cs.StatusReport()
+
+	return info, nil
+}
+
+func (r *Registrar) JoinChannel(channelID string, configBlock *cb.Block) (types.ChannelInfo, error) {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	if r.systemChannelID != "" {
+		return types.ChannelInfo{}, types.ErrSystemChannelExists
+	}
+
+	_, ok := r.chains[channelID]
+	if ok {
+		return types.ChannelInfo{}, types.ErrChannelAlreadyExists
+	}
+
+	//TODO
+	return types.ChannelInfo{}, errors.New("Not implemented yet")
+}
+
+func (r *Registrar) RemoveChannel(channelID string, removeStorage bool) error {
+	//TODO
+	return errors.New("Not implemented yet")
 }

@@ -1,5 +1,6 @@
 /*
 Copyright IBM Corp. All Rights Reserved.
+
 SPDX-License-Identifier: Apache-2.0
 */
 
@@ -9,9 +10,9 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/pkg/statedata"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/peer"
 )
 
 // ProcessorCreator creates a new instance of a processor of a particular transaction type.
@@ -136,7 +137,7 @@ type Reprocessor interface {
 }
 
 // ReprocessReadHinter is an optional interface that a `Processor` may choose to implement if it implements Reprocessor.
-// This is similar to as a processor may implement the ReadHinter interface albiet this gets invoked only if Reprocessor
+// This is similar to as a processor may implement the ReadHinter interface albeit this gets invoked only if Reprocessor
 // is used for processing the transaction
 type ReprocessReadHinter interface {
 	ReprocessReadHint(potentialWrites *statedata.WriteHint) *statedata.ReadHint
@@ -227,8 +228,6 @@ type Envelope struct {
 	Signature []byte
 	// Data contains the opaque Data bytes in the common.Payload
 	Data []byte
-	// HeaderBytes contains the marshalled Header in the common.Payload
-	HeaderBytes []byte
 	// ChannelHeaderBytes contains the marshalled ChannelHeader of the common.Header
 	ChannelHeaderBytes []byte
 	// ChannelHeaderBytes contains the marshalled SignatureHeader of the common.Header

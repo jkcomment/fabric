@@ -30,8 +30,8 @@ func pvtDataConf() *PrivateDataConfig {
 // StoreEnv provides the  store env for testing
 type StoreEnv struct {
 	t                 testing.TB
-	TestStoreProvider Provider
-	TestStore         Store
+	TestStoreProvider *Provider
+	TestStore         *Store
 	ledgerid          string
 	btlPolicy         pvtdatapolicy.BTLPolicy
 	conf              *PrivateDataConfig
@@ -50,7 +50,8 @@ func NewTestStoreEnv(
 	}
 	assert := assert.New(t)
 	conf.StorePath = storeDir
-	testStoreProvider := NewProvider(conf)
+	testStoreProvider, err := NewProvider(conf)
+	assert.NoError(err)
 	testStore, err := testStoreProvider.OpenStore(ledgerid)
 	testStore.Init(btlPolicy)
 	assert.NoError(err)
@@ -61,7 +62,8 @@ func NewTestStoreEnv(
 func (env *StoreEnv) CloseAndReopen() {
 	var err error
 	env.TestStoreProvider.Close()
-	env.TestStoreProvider = NewProvider(env.conf)
+	env.TestStoreProvider, err = NewProvider(env.conf)
+	assert.NoError(env.t, err)
 	env.TestStore, err = env.TestStoreProvider.OpenStore(env.ledgerid)
 	env.TestStore.Init(env.btlPolicy)
 	assert.NoError(env.t, err)

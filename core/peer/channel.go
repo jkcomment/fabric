@@ -9,6 +9,7 @@ package peer
 import (
 	"sync"
 
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
@@ -17,13 +18,12 @@ import (
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/transientstore"
 	"github.com/hyperledger/fabric/msp"
-	"github.com/hyperledger/fabric/protos/common"
 )
 
 // Channel manages objects and configuration associated with a Channel.
 type Channel struct {
 	ledger         ledger.PeerLedger
-	store          transientstore.Store
+	store          *transientstore.Store
 	cryptoProvider bccsp.BCCSP
 
 	// applyLock is used to serialize calls to Apply and bundle update processing.
@@ -104,7 +104,7 @@ func (c *Channel) Capabilities() channelconfig.ApplicationCapabilities {
 	return ac.Capabilities()
 }
 
-// GetMSPIDs retrieves the MSP IDs of the organziations in the current channel
+// GetMSPIDs retrieves the MSP IDs of the organizations in the current channel
 // configuration.
 func (c *Channel) GetMSPIDs() []string {
 	ac, ok := c.Resources().ApplicationConfig()
@@ -132,7 +132,7 @@ func (c *Channel) Ledger() ledger.PeerLedger {
 }
 
 // Store returns the transient store associated with this channel.
-func (c *Channel) Store() transientstore.Store {
+func (c *Channel) Store() *transientstore.Store {
 	return c.store
 }
 

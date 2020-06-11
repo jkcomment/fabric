@@ -8,31 +8,49 @@ package multichannel
 
 import (
 	"fmt"
+	"github.com/hyperledger/fabric/orderer/common/types"
 
+	cb "github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/common/capabilities"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
-	"github.com/hyperledger/fabric/internal/configtxgen/configtxgentest"
+	"github.com/hyperledger/fabric/core/config/configtest"
 	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	"github.com/hyperledger/fabric/orderer/consensus"
-	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 )
 
 type mockConsenter struct {
+	cluster bool
 }
 
 func (mc *mockConsenter) HandleChain(support consensus.ConsenterSupport, metadata *cb.Metadata) (consensus.Chain, error) {
-	return &mockChain{
+	chain := &mockChain{
 		queue:    make(chan *cb.Envelope),
 		cutter:   support.BlockCutter(),
 		support:  support,
 		metadata: metadata,
 		done:     make(chan struct{}),
-	}, nil
+	}
+
+	if mc.cluster {
+		clusterChain := &mockChainCluster{}
+		clusterChain.mockChain = chain
+		return clusterChain, nil
+	}
+
+	return chain, nil
+}
+
+type mockChainCluster struct {
+	*mockChain
+}
+
+func (c *mockChainCluster) StatusReport() (types.ClusterRelation, types.Status) {
+	return types.ClusterRelationMember, types.StatusActive
 }
 
 type mockChain struct {
@@ -124,7 +142,7 @@ func makeConfigTx(chainID string, i int) *cb.Envelope {
 }
 
 func makeConfigTxFull(chainID string, i int) *cb.Envelope {
-	gConf := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	gConf := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	gConf.Orderer.Capabilities = map[string]bool{
 		capabilities.OrdererV2_0: true,
 	}
@@ -142,7 +160,7 @@ func makeConfigTxFull(chainID string, i int) *cb.Envelope {
 }
 
 func makeConfigTxMig(chainID string, i int) *cb.Envelope {
-	gConf := configtxgentest.Load(genesisconfig.SampleInsecureSoloProfile)
+	gConf := genesisconfig.Load(genesisconfig.SampleInsecureSoloProfile, configtest.GetDevConfigDir())
 	gConf.Orderer.Capabilities = map[string]bool{
 		capabilities.OrdererV2_0: true,
 	}
@@ -160,7 +178,7 @@ func makeConfigTxMig(chainID string, i int) *cb.Envelope {
 }
 
 func wrapConfigTx(env *cb.Envelope) *cb.Envelope {
-	result, err := protoutil.CreateSignedEnvelope(cb.HeaderType_ORDERER_TRANSACTION, genesisconfig.TestChainID, mockCrypto(), env, msgVersion, epoch)
+	result, err := protoutil.CreateSignedEnvelope(cb.HeaderType_ORDERER_TRANSACTION, "testchannelid", mockCrypto(), env, msgVersion, epoch)
 	if err != nil {
 		panic(err)
 	}

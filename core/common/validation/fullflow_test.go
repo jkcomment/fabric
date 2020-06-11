@@ -13,23 +13,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/common/util"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric/bccsp/sw"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
 
-func getProposal(channel string) (*peer.Proposal, error) {
+func getProposal(channelID string) (*peer.Proposal, error) {
 	cis := &peer.ChaincodeInvocationSpec{
 		ChaincodeSpec: &peer.ChaincodeSpec{
 			ChaincodeId: getChaincodeID(),
 			Type:        peer.ChaincodeSpec_GOLANG}}
 
-	proposal, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, channel, cis, signerSerialized)
+	proposal, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, channelID, cis, signerSerialized)
 	return proposal, err
 }
 
@@ -108,7 +108,7 @@ func createSignedTxTwoActions(proposal *peer.Proposal, signer msp.SigningIdentit
 
 func TestGoodPath(t *testing.T) {
 	// get a toy proposal
-	prop, err := getProposal(util.GetTestChainID())
+	prop, err := getProposal("testchannelid")
 	if err != nil {
 		t.Fatalf("getProposal failed, err %s", err)
 		return
@@ -132,7 +132,9 @@ func TestGoodPath(t *testing.T) {
 	}
 
 	// validate the transaction
-	payl, txResult := ValidateTransaction(tx)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	payl, txResult := ValidateTransaction(tx, cryptoProvider)
 	if txResult != peer.TxValidationCode_VALID {
 		t.Fatalf("ValidateTransaction failed, err %s", err)
 		return
@@ -168,7 +170,7 @@ func TestGoodPath(t *testing.T) {
 
 func TestTXWithTwoActionsRejected(t *testing.T) {
 	// get a toy proposal
-	prop, err := getProposal(util.GetTestChainID())
+	prop, err := getProposal("testchannelid")
 	if err != nil {
 		t.Fatalf("getProposal failed, err %s", err)
 		return
@@ -192,7 +194,9 @@ func TestTXWithTwoActionsRejected(t *testing.T) {
 	}
 
 	// validate the transaction
-	_, txResult := ValidateTransaction(tx)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	_, txResult := ValidateTransaction(tx, cryptoProvider)
 	if txResult == peer.TxValidationCode_VALID {
 		t.Fatalf("ValidateTransaction should have failed")
 		return
@@ -206,7 +210,7 @@ func corrupt(bytes []byte) {
 
 func TestBadTx(t *testing.T) {
 	// get a toy proposal
-	prop, err := getProposal(util.GetTestChainID())
+	prop, err := getProposal("testchannelid")
 	if err != nil {
 		t.Fatalf("getProposal failed, err %s", err)
 		return
@@ -231,12 +235,14 @@ func TestBadTx(t *testing.T) {
 
 	// mess with the transaction payload
 	paylOrig := tx.Payload
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
 	for i := 0; i < len(paylOrig); i++ {
 		paylCopy := make([]byte, len(paylOrig))
 		copy(paylCopy, paylOrig)
 		paylCopy[i] = byte(int(paylCopy[i]+1) % 255)
 		// validate the transaction it should fail
-		_, txResult := ValidateTransaction(&common.Envelope{Signature: tx.Signature, Payload: paylCopy})
+		_, txResult := ValidateTransaction(&common.Envelope{Signature: tx.Signature, Payload: paylCopy}, cryptoProvider)
 		if txResult == peer.TxValidationCode_VALID {
 			t.Fatal("ValidateTransaction should have failed")
 			return
@@ -254,7 +260,7 @@ func TestBadTx(t *testing.T) {
 	corrupt(tx.Signature)
 
 	// validate the transaction it should fail
-	_, txResult := ValidateTransaction(tx)
+	_, txResult := ValidateTransaction(tx, cryptoProvider)
 	if txResult == peer.TxValidationCode_VALID {
 		t.Fatal("ValidateTransaction should have failed")
 		return
@@ -263,7 +269,7 @@ func TestBadTx(t *testing.T) {
 
 func Test2EndorsersAgree(t *testing.T) {
 	// get a toy proposal
-	prop, err := getProposal(util.GetTestChainID())
+	prop, err := getProposal("testchannelid")
 	if err != nil {
 		t.Fatalf("getProposal failed, err %s", err)
 		return
@@ -297,7 +303,9 @@ func Test2EndorsersAgree(t *testing.T) {
 	}
 
 	// validate the transaction
-	_, txResult := ValidateTransaction(tx)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+	_, txResult := ValidateTransaction(tx, cryptoProvider)
 	if txResult != peer.TxValidationCode_VALID {
 		t.Fatalf("ValidateTransaction failed, err %s", err)
 		return
@@ -306,7 +314,7 @@ func Test2EndorsersAgree(t *testing.T) {
 
 func Test2EndorsersDisagree(t *testing.T) {
 	// get a toy proposal
-	prop, err := getProposal(util.GetTestChainID())
+	prop, err := getProposal("testchannelid")
 	if err != nil {
 		t.Fatalf("getProposal failed, err %s", err)
 		return
@@ -341,9 +349,12 @@ func Test2EndorsersDisagree(t *testing.T) {
 }
 
 func TestInvocationsBadArgs(t *testing.T) {
-	_, code := ValidateTransaction(nil)
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	assert.NoError(t, err)
+
+	_, code := ValidateTransaction(nil, cryptoProvider)
 	assert.Equal(t, code, peer.TxValidationCode_NIL_ENVELOPE)
-	err := validateEndorserTransaction(nil, nil)
+	err = validateEndorserTransaction(nil, nil)
 	assert.Error(t, err)
 	err = validateConfigTransaction(nil, nil)
 	assert.Error(t, err)
@@ -359,7 +370,7 @@ func TestInvocationsBadArgs(t *testing.T) {
 	assert.Error(t, err)
 	err = validateSignatureHeader(&common.SignatureHeader{Nonce: []byte("a")})
 	assert.Error(t, err)
-	err = checkSignatureFromCreator(nil, nil, nil, "")
+	err = checkSignatureFromCreator(nil, nil, nil, "", cryptoProvider)
 	assert.Error(t, err)
 }
 
@@ -377,7 +388,14 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	signer, err = mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
+	cryptoProvider, err := sw.NewDefaultSecurityLevelWithKeystore(sw.NewDummyKeyStore())
+	if err != nil {
+		fmt.Printf("Initialize cryptoProvider bccsp failed: %s", err)
+		os.Exit(-1)
+		return
+	}
+
+	signer, err = mspmgmt.GetLocalMSP(cryptoProvider).GetDefaultSigningIdentity()
 	if err != nil {
 		fmt.Println("Could not get signer")
 		os.Exit(-1)

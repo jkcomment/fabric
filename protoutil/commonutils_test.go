@@ -12,10 +12,9 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	cb "github.com/hyperledger/fabric-protos-go/common"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
 	"github.com/hyperledger/fabric/common/crypto"
-	"github.com/hyperledger/fabric/internal/pkg/identity"
-	cb "github.com/hyperledger/fabric/protos/common"
-	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protoutil/fakes"
 	"github.com/stretchr/testify/assert"
 )
@@ -23,7 +22,7 @@ import (
 //go:generate counterfeiter -o fakes/signer_serializer.go --fake-name SignerSerializer . signerSerializer
 
 type signerSerializer interface {
-	identity.SignerSerializer
+	Signer
 }
 
 func TestNonceRandomness(t *testing.T) {
@@ -353,24 +352,6 @@ func testBlock() *cb.Block {
 			Data: [][]byte{MarshalOrPanic(testEnvelope())},
 		},
 	}
-}
-
-type mockLocalSigner struct {
-	returnError bool
-}
-
-func (m *mockLocalSigner) NewSignatureHeader() (*cb.SignatureHeader, error) {
-	if m.returnError {
-		return nil, errors.New("signature header error")
-	}
-	return &cb.SignatureHeader{}, nil
-}
-
-func (m *mockLocalSigner) Sign(message []byte) ([]byte, error) {
-	if m.returnError {
-		return nil, errors.New("sign error")
-	}
-	return message, nil
 }
 
 func TestChannelHeader(t *testing.T) {

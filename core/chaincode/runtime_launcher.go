@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
+	"github.com/hyperledger/fabric/core/chaincode/extcc"
+	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/pkg/errors"
 )
 
@@ -19,15 +22,52 @@ type LaunchRegistry interface {
 	Deregister(ccid string) error
 }
 
-// RuntimeLauncher is responsible for launching chaincode runtimes.
-type RuntimeLauncher struct {
-	Runtime        Runtime
-	Registry       LaunchRegistry
-	StartupTimeout time.Duration
-	Metrics        *LaunchMetrics
+// ConnectionHandler handles the `Chaincode` client connection
+type ConnectionHandler interface {
+	Stream(ccid string, ccinfo *ccintf.ChaincodeServerInfo, sHandler extcc.StreamHandler) error
 }
 
-func (r *RuntimeLauncher) Launch(ccid string) error {
+// RuntimeLauncher is responsible for launching chaincode runtimes.
+type RuntimeLauncher struct {
+	Runtime           Runtime
+	Registry          LaunchRegistry
+	StartupTimeout    time.Duration
+	Metrics           *LaunchMetrics
+	PeerAddress       string
+	CACert            []byte
+	CertGenerator     CertGenerator
+	ConnectionHandler ConnectionHandler
+}
+
+// CertGenerator generates client certificates for chaincode.
+type CertGenerator interface {
+	// Generate returns a certificate and private key and associates
+	// the hash of the certificates with the given chaincode name
+	Generate(ccName string) (*accesscontrol.CertAndPrivKeyPair, error)
+}
+
+func (r *RuntimeLauncher) ChaincodeClientInfo(ccid string) (*ccintf.PeerConnection, error) {
+	var tlsConfig *ccintf.TLSConfig
+	if r.CertGenerator != nil {
+		certKeyPair, err := r.CertGenerator.Generate(string(ccid))
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to generate TLS certificates for %s", ccid)
+		}
+
+		tlsConfig = &ccintf.TLSConfig{
+			ClientCert: certKeyPair.Cert,
+			ClientKey:  certKeyPair.Key,
+			RootCert:   r.CACert,
+		}
+	}
+
+	return &ccintf.PeerConnection{
+		Address:   r.PeerAddress,
+		TLSConfig: tlsConfig,
+	}, nil
+}
+
+func (r *RuntimeLauncher) Launch(ccid string, streamHandler extcc.StreamHandler) error {
 	var startFailCh chan error
 	var timeoutCh <-chan time.Time
 
@@ -38,7 +78,36 @@ func (r *RuntimeLauncher) Launch(ccid string) error {
 		timeoutCh = time.NewTimer(r.StartupTimeout).C
 
 		go func() {
-			if err := r.Runtime.Start(ccid); err != nil {
+			// go through the build process to obtain connecion information
+			ccservinfo, err := r.Runtime.Build(ccid)
+			if err != nil {
+				startFailCh <- errors.WithMessage(err, "error building chaincode")
+				return
+			}
+
+			// chaincode server model indicated... proceed to connect to CC
+			if ccservinfo != nil {
+				if err = r.ConnectionHandler.Stream(ccid, ccservinfo, streamHandler); err != nil {
+					startFailCh <- errors.WithMessagef(err, "connection to %s failed", ccid)
+					return
+				}
+
+				launchState.Notify(errors.Errorf("connection to %s terminated", ccid))
+				return
+			}
+
+			// default peer-as-server model... compute connection information for CC callback
+			// and proceed to launch chaincode
+			ccinfo, err := r.ChaincodeClientInfo(ccid)
+			if err != nil {
+				startFailCh <- errors.WithMessage(err, "could not get connection info")
+				return
+			}
+			if ccinfo == nil {
+				startFailCh <- errors.New("could not get connection info")
+				return
+			}
+			if err = r.Runtime.Start(ccid, ccinfo); err != nil {
 				startFailCh <- errors.WithMessage(err, "error starting container")
 				return
 			}
@@ -68,9 +137,6 @@ func (r *RuntimeLauncher) Launch(ccid string) error {
 		success = false
 		chaincodeLogger.Debugf("stopping due to error while launching: %+v", err)
 		defer r.Registry.Deregister(ccid)
-		if err := r.Runtime.Stop(ccid); err != nil {
-			chaincodeLogger.Debugf("stop failed: %+v", err)
-		}
 	}
 
 	r.Metrics.LaunchDuration.With(
@@ -80,4 +146,13 @@ func (r *RuntimeLauncher) Launch(ccid string) error {
 
 	chaincodeLogger.Debug("launch complete")
 	return err
+}
+
+func (r *RuntimeLauncher) Stop(ccid string) error {
+	err := r.Runtime.Stop(ccid)
+	if err != nil {
+		return errors.WithMessagef(err, "failed to stop chaincode %s", ccid)
+	}
+
+	return nil
 }

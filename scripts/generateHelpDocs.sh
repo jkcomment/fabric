@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-PATH=.build/bin/:${PATH}
+PATH=build/bin/:${PATH}
 
 # Takes in 4 arguments
 # 1. Output doc file
@@ -51,7 +51,7 @@ generateHelpText \
         docs/wrappers/peer_chaincode_postscript.md \
         "${commands[@]}"
 
-commands=("peer lifecycle" "peer lifecycle chaincode" "peer lifecycle chaincode package" "peer lifecycle chaincode install" "peer lifecycle chaincode queryinstalled" "peer lifecycle chaincode getinstalledpackage" "peer lifecycle chaincode approveformyorg" "peer lifecycle chaincode checkcommitreadiness" "peer lifecycle chaincode commit" "peer lifecycle chaincode querycommitted")
+commands=("peer lifecycle" "peer lifecycle chaincode" "peer lifecycle chaincode package" "peer lifecycle chaincode install" "peer lifecycle chaincode queryinstalled" "peer lifecycle chaincode getinstalledpackage" "peer lifecycle chaincode approveformyorg" "peer lifecycle chaincode queryapproved" "peer lifecycle chaincode checkcommitreadiness" "peer lifecycle chaincode commit" "peer lifecycle chaincode querycommitted")
 generateHelpText \
         docs/source/commands/peerlifecycle.md \
         docs/wrappers/peer_lifecycle_chaincode_preamble.md \
@@ -70,13 +70,6 @@ generateHelpText \
         docs/source/commands/peernode.md \
         docs/wrappers/peer_node_preamble.md \
         docs/wrappers/peer_node_postscript.md \
-        "${commands[@]}"
-
-commands=("token issue" "token list" "token transfer" "token redeem" "token saveConfig")
-generateHelpText \
-        docs/source/commands/token.md \
-        docs/wrappers/token_preamble.md \
-        docs/wrappers/token_postscript.md \
         "${commands[@]}"
 
 commands=("configtxgen")

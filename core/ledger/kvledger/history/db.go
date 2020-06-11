@@ -1,23 +1,25 @@
 /*
 Copyright IBM Corp. All Rights Reserved.
+
 SPDX-License-Identifier: Apache-2.0
 */
 
 package history
 
 import (
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/ledger/blkstorage"
+	"github.com/hyperledger/fabric/common/ledger/dataformat"
 	"github.com/hyperledger/fabric/common/ledger/util/leveldbhelper"
 	"github.com/hyperledger/fabric/core/ledger"
+	"github.com/hyperledger/fabric/core/ledger/internal/version"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
-	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/version"
-	"github.com/hyperledger/fabric/core/ledger/util"
-	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/internal/pkg/txflags"
 	protoutil "github.com/hyperledger/fabric/protoutil"
 )
 
-var logger = flogging.MustGetLogger("historyleveldb")
+var logger = flogging.MustGetLogger("history")
 
 // DBProvider provides handle to HistoryDB for a given channel
 type DBProvider struct {
@@ -25,12 +27,20 @@ type DBProvider struct {
 }
 
 // NewDBProvider instantiates DBProvider
-func NewDBProvider(path string) *DBProvider {
+func NewDBProvider(path string) (*DBProvider, error) {
 	logger.Debugf("constructing HistoryDBProvider dbPath=%s", path)
-	dbProvider := leveldbhelper.NewProvider(&leveldbhelper.Conf{DBPath: path})
-	return &DBProvider{
-		leveldbProvider: dbProvider,
+	levelDBProvider, err := leveldbhelper.NewProvider(
+		&leveldbhelper.Conf{
+			DBPath:         path,
+			ExpectedFormat: dataformat.CurrentFormat,
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
+	return &DBProvider{
+		leveldbProvider: levelDBProvider,
+	}, nil
 }
 
 // GetDBHandle gets the handle to a named database
@@ -66,7 +76,7 @@ func (d *DB) Commit(block *common.Block) error {
 		d.name, blockNo, len(block.Data.Data))
 
 	// Get the invalidation byte array for the block
-	txsFilter := util.TxValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
+	txsFilter := txflags.ValidationFlags(block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER])
 
 	// write each tran's write set to history db
 	for _, envBytes := range block.Data.Data {
@@ -136,7 +146,7 @@ func (d *DB) Commit(block *common.Block) error {
 }
 
 // NewQueryExecutor implements method in HistoryDB interface
-func (d *DB) NewQueryExecutor(blockStore blkstorage.BlockStore) (ledger.HistoryQueryExecutor, error) {
+func (d *DB) NewQueryExecutor(blockStore *blkstorage.BlockStore) (ledger.HistoryQueryExecutor, error) {
 	return &QueryExecutor{d.levelDB, blockStore}, nil
 }
 

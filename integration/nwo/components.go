@@ -20,32 +20,32 @@ type Components struct {
 }
 
 func (c *Components) ConfigTxGen() string {
-	return c.build("github.com/hyperledger/fabric/cmd/configtxgen")
+	return c.Build("github.com/hyperledger/fabric/cmd/configtxgen")
 }
 
 func (c *Components) Cryptogen() string {
-	return c.build("github.com/hyperledger/fabric/cmd/cryptogen")
+	return c.Build("github.com/hyperledger/fabric/cmd/cryptogen")
 }
 
 func (c *Components) Discover() string {
-	return c.build("github.com/hyperledger/fabric/cmd/discover")
+	return c.Build("github.com/hyperledger/fabric/cmd/discover")
 }
 
 func (c *Components) Idemixgen() string {
-	return c.build("github.com/hyperledger/fabric/common/tools/idemixgen")
+	return c.Build("github.com/hyperledger/fabric/cmd/idemixgen")
 }
 
 func (c *Components) Orderer() string {
-	return c.build("github.com/hyperledger/fabric/orderer")
+	return c.Build("github.com/hyperledger/fabric/cmd/orderer")
 }
 
 func (c *Components) Peer() string {
-	return c.build("github.com/hyperledger/fabric/cmd/peer")
+	return c.Build("github.com/hyperledger/fabric/cmd/peer")
 }
 
 func (c *Components) Cleanup() {}
 
-func (c *Components) build(path string) string {
+func (c *Components) Build(path string) string {
 	Expect(c.ServerAddress).NotTo(BeEmpty(), "build server address is empty")
 
 	resp, err := http.Get(fmt.Sprintf("http://%s/%s", c.ServerAddress, path))

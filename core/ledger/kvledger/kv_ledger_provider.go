@@ -9,17 +9,21 @@ package kvledger
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric/common/ledger/blkstorage"
+	"github.com/hyperledger/fabric/common/ledger/dataformat"
 	"github.com/hyperledger/fabric/common/ledger/util/leveldbhelper"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/confighistory"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/bookkeeping"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/history"
+	"github.com/hyperledger/fabric/core/ledger/kvledger/msgs"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/privacyenabledstate"
-	"github.com/hyperledger/fabric/core/ledger/ledgerstorage"
 	"github.com/hyperledger/fabric/core/ledger/pvtdatastorage"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -28,33 +32,72 @@ import (
 var (
 	// ErrLedgerIDExists is thrown by a CreateLedger call if a ledger with the given id already exists
 	ErrLedgerIDExists = errors.New("LedgerID already exists")
-	// ErrNonExistingLedgerID is thrown by a OpenLedger call if a ledger with the given id does not exist
+	// ErrNonExistingLedgerID is thrown by an OpenLedger call if a ledger with the given id does not exist
 	ErrNonExistingLedgerID = errors.New("LedgerID does not exist")
 	// ErrLedgerNotOpened is thrown by a CloseLedger call if a ledger with the given id has not been opened
 	ErrLedgerNotOpened = errors.New("ledger is not opened yet")
+	// ErrInactiveLedger is thrown by an OpenLedger call if a ledger with the given id is not active
+	ErrInactiveLedger = errors.New("Ledger is not active")
 
 	underConstructionLedgerKey = []byte("underConstructionLedgerKey")
-	ledgerKeyPrefix            = []byte("l")
+	// ledgerKeyPrefix is the prefix for each ledger key in idStore db
+	ledgerKeyPrefix = []byte{'l'}
+	// ledgerKeyStop is the end key when querying idStore db by ledger key
+	ledgerKeyStop = []byte{'l' + 1}
+	// metadataKeyPrefix is the prefix for each metadata key in idStore db
+	metadataKeyPrefix = []byte{'s'}
+	// metadataKeyStop is the end key when querying idStore db by metadata key
+	metadataKeyStop = []byte{'s' + 1}
+
+	// formatKey
+	formatKey = []byte("f")
+
+	attrsToIndex = []blkstorage.IndexableAttr{
+		blkstorage.IndexableAttrBlockHash,
+		blkstorage.IndexableAttrBlockNum,
+		blkstorage.IndexableAttrTxID,
+		blkstorage.IndexableAttrBlockNumTranNum,
+	}
 )
+
+const maxBlockFileSize = 64 * 1024 * 1024
 
 // Provider implements interface ledger.PeerLedgerProvider
 type Provider struct {
-	idStore             *idStore
-	ledgerStoreProvider *ledgerstorage.Provider
-	vdbProvider         privacyenabledstate.DBProvider
-	historydbProvider   *history.DBProvider
-	configHistoryMgr    confighistory.Mgr
-	stateListeners      []ledger.StateListener
-	bookkeepingProvider bookkeeping.Provider
-	initializer         *ledger.Initializer
-	collElgNotifier     *collElgNotifier
-	stats               *stats
-	fileLock            *leveldbhelper.FileLock
+	idStore              *idStore
+	blkStoreProvider     *blkstorage.BlockStoreProvider
+	pvtdataStoreProvider *pvtdatastorage.Provider
+	dbProvider           *privacyenabledstate.DBProvider
+	historydbProvider    *history.DBProvider
+	configHistoryMgr     confighistory.Mgr
+	stateListeners       []ledger.StateListener
+	bookkeepingProvider  bookkeeping.Provider
+	initializer          *ledger.Initializer
+	collElgNotifier      *collElgNotifier
+	stats                *stats
+	fileLock             *leveldbhelper.FileLock
 }
 
 // NewProvider instantiates a new Provider.
 // This is not thread-safe and assumed to be synchronized by the caller
-func NewProvider(initializer *ledger.Initializer) (*Provider, error) {
+func NewProvider(initializer *ledger.Initializer) (pr *Provider, e error) {
+	p := &Provider{
+		initializer: initializer,
+	}
+
+	defer func() {
+		if e != nil {
+			p.Close()
+			if errFormatMismatch, ok := e.(*dataformat.ErrFormatMismatch); ok {
+				if errFormatMismatch.Format == dataformat.PreviousFormat && errFormatMismatch.ExpectedFormat == dataformat.CurrentFormat {
+					logger.Errorf("Please execute the 'peer node upgrade-dbs' command to upgrade the database format: %s", errFormatMismatch)
+				} else {
+					logger.Errorf("Please check the Fabric version matches the ledger data format: %s", errFormatMismatch)
+				}
+			}
+		}
+	}()
+
 	fileLockPath := fileLockPath(initializer.Config.RootFSPath)
 	fileLock := leveldbhelper.NewFileLock(fileLockPath)
 	if err := fileLock.Lock(); err != nil {
@@ -62,70 +105,165 @@ func NewProvider(initializer *ledger.Initializer) (*Provider, error) {
 			" wait for that command to complete its execution or terminate it before retrying")
 	}
 
-	p := &Provider{}
-	p.initializer = initializer
 	p.fileLock = fileLock
-	// initialize the ID store (inventory of chainIds/ledgerIds)
-	idStore := openIDStore(ledgerProviderPath(p.initializer.Config.RootFSPath))
-	p.idStore = idStore
-	// initialize ledger storage
-	privateData := &pvtdatastorage.PrivateDataConfig{
-		PrivateDataConfig: initializer.Config.PrivateDataConfig,
-		StorePath:         PvtDataStorePath(p.initializer.Config.RootFSPath),
+
+	if err := p.initLedgerIDInventory(); err != nil {
+		return nil, err
 	}
-	ledgerStoreProvider := ledgerstorage.NewProvider(
-		BlockStorePath(p.initializer.Config.RootFSPath),
-		privateData,
+	if err := p.initBlockStoreProvider(); err != nil {
+		return nil, err
+	}
+	if err := p.initPvtDataStoreProvider(); err != nil {
+		return nil, err
+	}
+	if err := p.initHistoryDBProvider(); err != nil {
+		return nil, err
+	}
+	if err := p.initConfigHistoryManager(); err != nil {
+		return nil, err
+	}
+	p.initCollElgNotifier()
+	p.initStateListeners()
+	if err := p.initStateDBProvider(); err != nil {
+		return nil, err
+	}
+	p.initLedgerStatistics()
+	p.recoverUnderConstructionLedger()
+	if err := p.initSnapshotDir(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *Provider) initLedgerIDInventory() error {
+	idStore, err := openIDStore(LedgerProviderPath(p.initializer.Config.RootFSPath))
+	if err != nil {
+		return err
+	}
+	p.idStore = idStore
+	return nil
+}
+
+func (p *Provider) initBlockStoreProvider() error {
+	indexConfig := &blkstorage.IndexConfig{AttrsToIndex: attrsToIndex}
+	blkStoreProvider, err := blkstorage.NewProvider(
+		blkstorage.NewConf(
+			BlockStorePath(p.initializer.Config.RootFSPath),
+			maxBlockFileSize,
+		),
+		indexConfig,
 		p.initializer.MetricsProvider,
 	)
-	p.ledgerStoreProvider = ledgerStoreProvider
-	if initializer.Config.HistoryDBConfig.Enabled {
-		// Initialize the history database (index for history of values by key)
-		historydbProvider := history.NewDBProvider(
-			HistoryDBPath(p.initializer.Config.RootFSPath),
-		)
-		p.historydbProvider = historydbProvider
+	if err != nil {
+		return err
 	}
-	// initialize config history for chaincode
-	configHistoryMgr := confighistory.NewMgr(
-		ConfigHistoryDBPath(p.initializer.Config.RootFSPath),
-		initializer.DeployedChaincodeInfoProvider,
-	)
-	p.configHistoryMgr = configHistoryMgr
-	// initialize the collection eligibility notifier
+	p.blkStoreProvider = blkStoreProvider
+	return nil
+}
 
+func (p *Provider) initPvtDataStoreProvider() error {
+	privateDataConfig := &pvtdatastorage.PrivateDataConfig{
+		PrivateDataConfig: p.initializer.Config.PrivateDataConfig,
+		StorePath:         PvtDataStorePath(p.initializer.Config.RootFSPath),
+	}
+	pvtdataStoreProvider, err := pvtdatastorage.NewProvider(privateDataConfig)
+	if err != nil {
+		return err
+	}
+	p.pvtdataStoreProvider = pvtdataStoreProvider
+	return nil
+}
+
+func (p *Provider) initHistoryDBProvider() error {
+	if !p.initializer.Config.HistoryDBConfig.Enabled {
+		return nil
+	}
+	// Initialize the history database (index for history of values by key)
+	historydbProvider, err := history.NewDBProvider(
+		HistoryDBPath(p.initializer.Config.RootFSPath),
+	)
+	if err != nil {
+		return err
+	}
+	p.historydbProvider = historydbProvider
+	return nil
+}
+
+func (p *Provider) initConfigHistoryManager() error {
+	var err error
+	configHistoryMgr, err := confighistory.NewMgr(
+		ConfigHistoryDBPath(p.initializer.Config.RootFSPath),
+		p.initializer.DeployedChaincodeInfoProvider,
+	)
+	if err != nil {
+		return err
+	}
+	p.configHistoryMgr = configHistoryMgr
+	return nil
+}
+
+func (p *Provider) initCollElgNotifier() {
 	collElgNotifier := &collElgNotifier{
-		initializer.DeployedChaincodeInfoProvider,
-		initializer.MembershipInfoProvider,
+		p.initializer.DeployedChaincodeInfoProvider,
+		p.initializer.MembershipInfoProvider,
 		make(map[string]collElgListener),
 	}
 	p.collElgNotifier = collElgNotifier
-	// initialize the state listeners
-	stateListeners := initializer.StateListeners
-	stateListeners = append(stateListeners, collElgNotifier)
-	stateListeners = append(stateListeners, configHistoryMgr)
-	p.stateListeners = stateListeners
+}
 
-	p.bookkeepingProvider = bookkeeping.NewProvider(
+func (p *Provider) initStateListeners() {
+	stateListeners := p.initializer.StateListeners
+	stateListeners = append(stateListeners, p.collElgNotifier)
+	stateListeners = append(stateListeners, p.configHistoryMgr)
+	p.stateListeners = stateListeners
+}
+
+func (p *Provider) initStateDBProvider() error {
+	var err error
+	p.bookkeepingProvider, err = bookkeeping.NewProvider(
 		BookkeeperDBPath(p.initializer.Config.RootFSPath),
 	)
-	var err error
+	if err != nil {
+		return err
+	}
 	stateDB := &privacyenabledstate.StateDBConfig{
-		StateDBConfig: initializer.Config.StateDBConfig,
+		StateDBConfig: p.initializer.Config.StateDBConfig,
 		LevelDBPath:   StateDBPath(p.initializer.Config.RootFSPath),
 	}
-	p.vdbProvider, err = privacyenabledstate.NewCommonStorageDBProvider(
+	sysNamespaces := p.initializer.DeployedChaincodeInfoProvider.Namespaces()
+	p.dbProvider, err = privacyenabledstate.NewDBProvider(
 		p.bookkeepingProvider,
-		initializer.MetricsProvider,
-		initializer.HealthCheckRegistry,
+		p.initializer.MetricsProvider,
+		p.initializer.HealthCheckRegistry,
 		stateDB,
+		sysNamespaces,
 	)
-	if err != nil {
-		return nil, err
+	return err
+}
+
+func (p *Provider) initLedgerStatistics() {
+	p.stats = newStats(p.initializer.MetricsProvider)
+}
+
+func (p *Provider) initSnapshotDir() error {
+	snapshotsRootDir := p.initializer.Config.SnapshotsConfig.RootDir
+	if !path.IsAbs(snapshotsRootDir) {
+		return errors.Errorf("invalid path: %s. The path for the snapshot dir is expected to be an absolute path", snapshotsRootDir)
 	}
-	p.stats = newStats(initializer.MetricsProvider)
-	p.recoverUnderConstructionLedger()
-	return p, nil
+
+	inProgressSnapshotsPath := InProgressSnapshotsPath(snapshotsRootDir)
+	completedSnapshotsPath := CompletedSnapshotsPath(snapshotsRootDir)
+
+	if err := os.RemoveAll(inProgressSnapshotsPath); err != nil {
+		return errors.Wrapf(err, "error while deleting the dir: %s", inProgressSnapshotsPath)
+	}
+	if err := os.MkdirAll(inProgressSnapshotsPath, 0755); err != nil {
+		return errors.Wrapf(err, "error while creating the dir: %s", inProgressSnapshotsPath)
+	}
+	if err := os.MkdirAll(completedSnapshotsPath, 0755); err != nil {
+		return errors.Wrapf(err, "error while creating the dir: %s", completedSnapshotsPath)
+	}
+	return syncDir(snapshotsRootDir)
 }
 
 // Create implements the corresponding method from interface ledger.PeerLedgerProvider
@@ -134,7 +272,7 @@ func NewProvider(initializer *ledger.Initializer) (*Provider, error) {
 // created ledgers list (atomically). If a crash happens in between, the 'recoverUnderConstructionLedger'
 // function is invoked before declaring the provider to be usable
 func (p *Provider) Create(genesisBlock *common.Block) (ledger.PeerLedger, error) {
-	ledgerID, err := protoutil.GetChainIDFromBlock(genesisBlock)
+	ledgerID, err := protoutil.GetChannelIDFromBlock(genesisBlock)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +286,7 @@ func (p *Provider) Create(genesisBlock *common.Block) (ledger.PeerLedger, error)
 	if err = p.idStore.setUnderConstructionFlag(ledgerID); err != nil {
 		return nil, err
 	}
-	lgr, err := p.openInternal(ledgerID)
+	lgr, err := p.open(ledgerID)
 	if err != nil {
 		logger.Errorf("Error opening a new empty ledger. Unsetting under construction flag. Error: %+v", err)
 		panicOnErr(p.runCleanup(ledgerID), "Error running cleanup for ledger id [%s]", ledgerID)
@@ -167,26 +305,36 @@ func (p *Provider) Create(genesisBlock *common.Block) (ledger.PeerLedger, error)
 func (p *Provider) Open(ledgerID string) (ledger.PeerLedger, error) {
 	logger.Debugf("Open() opening kvledger: %s", ledgerID)
 	// Check the ID store to ensure that the chainId/ledgerId exists
-	exists, err := p.idStore.ledgerIDExists(ledgerID)
+	active, exists, err := p.idStore.ledgerIDActive(ledgerID)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
 		return nil, ErrNonExistingLedgerID
 	}
-	return p.openInternal(ledgerID)
+	if !active {
+		return nil, ErrInactiveLedger
+	}
+	return p.open(ledgerID)
 }
 
-func (p *Provider) openInternal(ledgerID string) (ledger.PeerLedger, error) {
+func (p *Provider) open(ledgerID string) (ledger.PeerLedger, error) {
 	// Get the block store for a chain/ledger
-	blockStore, err := p.ledgerStoreProvider.Open(ledgerID)
+	blockStore, err := p.blkStoreProvider.Open(ledgerID)
 	if err != nil {
 		return nil, err
 	}
-	p.collElgNotifier.registerListener(ledgerID, blockStore)
+
+	pvtdataStore, err := p.pvtdataStoreProvider.OpenStore(ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	p.collElgNotifier.registerListener(ledgerID, pvtdataStore)
 
 	// Get the versioned database (state database) for a chain/ledger
-	vDB, err := p.vdbProvider.GetDBHandle(ledgerID)
+	channelInfoProvider := &channelInfoProvider{ledgerID, blockStore, p.collElgNotifier.deployedChaincodeInfoProvider}
+	db, err := p.dbProvider.GetDBHandle(ledgerID, channelInfoProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -200,21 +348,24 @@ func (p *Provider) openInternal(ledgerID string) (ledger.PeerLedger, error) {
 		}
 	}
 
-	// Create a kvLedger for this chain/ledger, which encasulates the underlying data stores
-	// (id store, blockstore, state database, history database)
-	l, err := newKVLedger(
-		ledgerID,
-		blockStore,
-		vDB,
-		historyDB,
-		p.configHistoryMgr,
-		p.stateListeners,
-		p.bookkeepingProvider,
-		p.initializer.DeployedChaincodeInfoProvider,
-		p.initializer.ChaincodeLifecycleEventProvider,
-		p.stats.ledgerStats(ledgerID),
-		p.initializer.CustomTxProcessors,
-	)
+	initializer := &lgrInitializer{
+		ledgerID:                 ledgerID,
+		blockStore:               blockStore,
+		pvtdataStore:             pvtdataStore,
+		stateDB:                  db,
+		historyDB:                historyDB,
+		configHistoryMgr:         p.configHistoryMgr,
+		stateListeners:           p.stateListeners,
+		bookkeeperProvider:       p.bookkeepingProvider,
+		ccInfoProvider:           p.initializer.DeployedChaincodeInfoProvider,
+		ccLifecycleEventProvider: p.initializer.ChaincodeLifecycleEventProvider,
+		stats:                    p.stats.ledgerStats(ledgerID),
+		customTxProcessors:       p.initializer.CustomTxProcessors,
+		hashProvider:             p.initializer.HashProvider,
+		snapshotsConfig:          p.initializer.Config.SnapshotsConfig,
+	}
+
+	l, err := newKVLedger(initializer)
 	if err != nil {
 		return nil, err
 	}
@@ -228,20 +379,35 @@ func (p *Provider) Exists(ledgerID string) (bool, error) {
 
 // List implements the corresponding method from interface ledger.PeerLedgerProvider
 func (p *Provider) List() ([]string, error) {
-	return p.idStore.getAllLedgerIds()
+	return p.idStore.getActiveLedgerIDs()
 }
 
 // Close implements the corresponding method from interface ledger.PeerLedgerProvider
 func (p *Provider) Close() {
-	p.idStore.close()
-	p.ledgerStoreProvider.Close()
-	p.vdbProvider.Close()
-	p.bookkeepingProvider.Close()
-	p.configHistoryMgr.Close()
+	if p.idStore != nil {
+		p.idStore.close()
+	}
+	if p.blkStoreProvider != nil {
+		p.blkStoreProvider.Close()
+	}
+	if p.pvtdataStoreProvider != nil {
+		p.pvtdataStoreProvider.Close()
+	}
+	if p.dbProvider != nil {
+		p.dbProvider.Close()
+	}
+	if p.bookkeepingProvider != nil {
+		p.bookkeepingProvider.Close()
+	}
+	if p.configHistoryMgr != nil {
+		p.configHistoryMgr.Close()
+	}
 	if p.historydbProvider != nil {
 		p.historydbProvider.Close()
 	}
-	p.fileLock.Unlock()
+	if p.fileLock != nil {
+		p.fileLock.Unlock()
+	}
 }
 
 // recoverUnderConstructionLedger checks whether the under construction flag is set - this would be the case
@@ -257,7 +423,7 @@ func (p *Provider) recoverUnderConstructionLedger() {
 		return
 	}
 	logger.Infof("ledger [%s] found as under construction", ledgerID)
-	ledger, err := p.openInternal(ledgerID)
+	ledger, err := p.open(ledgerID)
 	panicOnErr(err, "Error while opening under construction ledger [%s]", ledgerID)
 	bcInfo, err := ledger.GetBlockchainInfo()
 	panicOnErr(err, "Error while getting blockchain info for the under construction ledger [%s]", ledgerID)
@@ -278,7 +444,6 @@ func (p *Provider) recoverUnderConstructionLedger() {
 			"data inconsistency: under construction flag is set for ledger [%s] while the height of the blockchain is [%d]",
 			ledgerID, bcInfo.Height))
 	}
-	return
 }
 
 // runCleanup cleans up blockstorage, statedb, and historydb for what
@@ -304,13 +469,115 @@ func panicOnErr(err error, mgsFormat string, args ...interface{}) {
 // Ledger id persistence related code
 ///////////////////////////////////////////////////////////////////////
 type idStore struct {
-	db *leveldbhelper.DB
+	db     *leveldbhelper.DB
+	dbPath string
 }
 
-func openIDStore(path string) *idStore {
+func openIDStore(path string) (s *idStore, e error) {
 	db := leveldbhelper.CreateDB(&leveldbhelper.Conf{DBPath: path})
 	db.Open()
-	return &idStore{db}
+	defer func() {
+		if e != nil {
+			db.Close()
+		}
+	}()
+
+	emptyDB, err := db.IsEmpty()
+	if err != nil {
+		return nil, err
+	}
+
+	expectedFormatBytes := []byte(dataformat.CurrentFormat)
+	if emptyDB {
+		// add format key to a new db
+		err := db.Put(formatKey, expectedFormatBytes, true)
+		if err != nil {
+			return nil, err
+		}
+		return &idStore{db, path}, nil
+	}
+
+	// verify the format is current for an existing db
+	format, err := db.Get(formatKey)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(format, expectedFormatBytes) {
+		logger.Errorf("The db at path [%s] contains data in unexpected format. expected data format = [%s] (%#v), data format = [%s] (%#v).",
+			path, dataformat.CurrentFormat, expectedFormatBytes, format, format)
+		return nil, &dataformat.ErrFormatMismatch{
+			ExpectedFormat: dataformat.CurrentFormat,
+			Format:         string(format),
+			DBInfo:         fmt.Sprintf("leveldb for channel-IDs at [%s]", path),
+		}
+	}
+	return &idStore{db, path}, nil
+}
+
+// checkUpgradeEligibility checks if the format is eligible to upgrade.
+// It returns true if the format is eligible to upgrade to the current format.
+// It returns false if either the format is the current format or the db is empty.
+// Otherwise, an ErrFormatMismatch is returned.
+func (s *idStore) checkUpgradeEligibility() (bool, error) {
+	emptydb, err := s.db.IsEmpty()
+	if err != nil {
+		return false, err
+	}
+	if emptydb {
+		logger.Warnf("Ledger database %s is empty, nothing to upgrade", s.dbPath)
+		return false, nil
+	}
+	format, err := s.db.Get(formatKey)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(format, []byte(dataformat.CurrentFormat)) {
+		logger.Debugf("Ledger database %s has current data format, nothing to upgrade", s.dbPath)
+		return false, nil
+	}
+	if !bytes.Equal(format, []byte(dataformat.PreviousFormat)) {
+		err = &dataformat.ErrFormatMismatch{
+			ExpectedFormat: dataformat.PreviousFormat,
+			Format:         string(format),
+			DBInfo:         fmt.Sprintf("leveldb for channel-IDs at [%s]", s.dbPath),
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *idStore) upgradeFormat() error {
+	eligible, err := s.checkUpgradeEligibility()
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return nil
+	}
+
+	logger.Infof("Upgrading ledgerProvider database to the new format %s", dataformat.CurrentFormat)
+
+	batch := &leveldb.Batch{}
+	batch.Put(formatKey, []byte(dataformat.CurrentFormat))
+
+	// add new metadata key for each ledger (channel)
+	metadata, err := protoutil.Marshal(&msgs.LedgerMetadata{Status: msgs.Status_ACTIVE})
+	if err != nil {
+		logger.Errorf("Error marshalling ledger metadata: %s", err)
+		return errors.Wrapf(err, "error marshalling ledger metadata")
+	}
+	itr := s.db.GetIterator(ledgerKeyPrefix, ledgerKeyStop)
+	defer itr.Release()
+	for itr.Error() == nil && itr.Next() {
+		id := s.decodeLedgerID(itr.Key(), ledgerKeyPrefix)
+		batch.Put(s.encodeLedgerKey(id, metadataKeyPrefix), metadata)
+	}
+	if err = itr.Error(); err != nil {
+		logger.Errorf("Error while upgrading idStore format: %s", err)
+		return errors.Wrapf(err, "error while upgrading idStore format")
+	}
+
+	return s.db.WriteBatch(batch, true)
 }
 
 func (s *idStore) setUnderConstructionFlag(ledgerID string) error {
@@ -330,10 +597,12 @@ func (s *idStore) getUnderConstructionFlag() (string, error) {
 }
 
 func (s *idStore) createLedgerID(ledgerID string, gb *common.Block) error {
-	key := s.encodeLedgerKey(ledgerID)
+	gbKey := s.encodeLedgerKey(ledgerID, ledgerKeyPrefix)
+	metadataKey := s.encodeLedgerKey(ledgerID, metadataKeyPrefix)
 	var val []byte
+	var metadata []byte
 	var err error
-	if val, err = s.db.Get(key); err != nil {
+	if val, err = s.db.Get(gbKey); err != nil {
 		return err
 	}
 	if val != nil {
@@ -342,34 +611,89 @@ func (s *idStore) createLedgerID(ledgerID string, gb *common.Block) error {
 	if val, err = proto.Marshal(gb); err != nil {
 		return err
 	}
+	if metadata, err = protoutil.Marshal(&msgs.LedgerMetadata{Status: msgs.Status_ACTIVE}); err != nil {
+		return err
+	}
 	batch := &leveldb.Batch{}
-	batch.Put(key, val)
+	batch.Put(gbKey, val)
+	batch.Put(metadataKey, metadata)
 	batch.Delete(underConstructionLedgerKey)
 	return s.db.WriteBatch(batch, true)
 }
 
+func (s *idStore) updateLedgerStatus(ledgerID string, newStatus msgs.Status) error {
+	metadata, err := s.getLedgerMetadata(ledgerID)
+	if err != nil {
+		return err
+	}
+	if metadata == nil {
+		logger.Errorf("LedgerID [%s] does not exist", ledgerID)
+		return ErrNonExistingLedgerID
+	}
+	if metadata.Status == newStatus {
+		logger.Infof("Ledger [%s] is already in [%s] status, nothing to do", ledgerID, newStatus)
+		return nil
+	}
+	metadata.Status = newStatus
+	metadataBytes, err := proto.Marshal(metadata)
+	if err != nil {
+		logger.Errorf("Error marshalling ledger metadata: %s", err)
+		return errors.Wrapf(err, "error marshalling ledger metadata")
+	}
+	logger.Infof("Updating ledger [%s] status to [%s]", ledgerID, newStatus)
+	key := s.encodeLedgerKey(ledgerID, metadataKeyPrefix)
+	return s.db.Put(key, metadataBytes, true)
+}
+
+func (s *idStore) getLedgerMetadata(ledgerID string) (*msgs.LedgerMetadata, error) {
+	val, err := s.db.Get(s.encodeLedgerKey(ledgerID, metadataKeyPrefix))
+	if val == nil || err != nil {
+		return nil, err
+	}
+	metadata := &msgs.LedgerMetadata{}
+	if err := proto.Unmarshal(val, metadata); err != nil {
+		logger.Errorf("Error unmarshalling ledger metadata: %s", err)
+		return nil, errors.Wrapf(err, "error unmarshalling ledger metadata")
+	}
+	return metadata, nil
+}
+
 func (s *idStore) ledgerIDExists(ledgerID string) (bool, error) {
-	key := s.encodeLedgerKey(ledgerID)
-	val := []byte{}
-	err := error(nil)
-	if val, err = s.db.Get(key); err != nil {
+	key := s.encodeLedgerKey(ledgerID, ledgerKeyPrefix)
+	val, err := s.db.Get(key)
+	if err != nil {
 		return false, err
 	}
 	return val != nil, nil
 }
 
-func (s *idStore) getAllLedgerIds() ([]string, error) {
+// ledgerIDActive returns if a ledger is active and existed
+func (s *idStore) ledgerIDActive(ledgerID string) (bool, bool, error) {
+	metadata, err := s.getLedgerMetadata(ledgerID)
+	if metadata == nil || err != nil {
+		return false, false, err
+	}
+	return metadata.Status == msgs.Status_ACTIVE, true, nil
+}
+
+func (s *idStore) getActiveLedgerIDs() ([]string, error) {
 	var ids []string
-	itr := s.db.GetIterator(nil, nil)
+	itr := s.db.GetIterator(metadataKeyPrefix, metadataKeyStop)
 	defer itr.Release()
-	itr.First()
-	for itr.Valid() {
-		if bytes.Equal(itr.Key(), underConstructionLedgerKey) {
-			continue
+	for itr.Error() == nil && itr.Next() {
+		metadata := &msgs.LedgerMetadata{}
+		if err := proto.Unmarshal(itr.Value(), metadata); err != nil {
+			logger.Errorf("Error unmarshalling ledger metadata: %s", err)
+			return nil, errors.Wrapf(err, "error unmarshalling ledger metadata")
 		}
-		id := string(s.decodeLedgerID(itr.Key()))
-		ids = append(ids, id)
-		itr.Next()
+		if metadata.Status == msgs.Status_ACTIVE {
+			id := s.decodeLedgerID(itr.Key(), metadataKeyPrefix)
+			ids = append(ids, id)
+		}
+	}
+	if err := itr.Error(); err != nil {
+		logger.Errorf("Error getting ledger ids from idStore: %s", err)
+		return nil, errors.Wrapf(err, "error getting ledger ids from idStore")
 	}
 	return ids, nil
 }
@@ -378,10 +702,10 @@ func (s *idStore) close() {
 	s.db.Close()
 }
 
-func (s *idStore) encodeLedgerKey(ledgerID string) []byte {
-	return append(ledgerKeyPrefix, []byte(ledgerID)...)
+func (s *idStore) encodeLedgerKey(ledgerID string, prefix []byte) []byte {
+	return append(prefix, []byte(ledgerID)...)
 }
 
-func (s *idStore) decodeLedgerID(key []byte) string {
-	return string(key[len(ledgerKeyPrefix):])
+func (s *idStore) decodeLedgerID(key []byte, prefix []byte) string {
+	return string(key[len(prefix):])
 }

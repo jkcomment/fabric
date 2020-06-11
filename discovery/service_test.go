@@ -14,12 +14,12 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/discovery"
+	"github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/gossip/api"
 	gcommon "github.com/hyperledger/fabric/gossip/common"
 	gdisc "github.com/hyperledger/fabric/gossip/discovery"
 	"github.com/hyperledger/fabric/gossip/protoext"
-	"github.com/hyperledger/fabric/protos/discovery"
-	"github.com/hyperledger/fabric/protos/gossip"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -242,6 +242,7 @@ func TestService(t *testing.T) {
 		},
 	}
 	resp, err = service.Discover(ctx, toSignedRequest(req))
+	assert.NoError(t, err)
 	expectedChannelResponse := &discovery.PeerMembershipResult{
 		PeersByOrg: map[string]*discovery.Peers{
 			"O2": {
@@ -417,6 +418,8 @@ func TestValidateStructure(t *testing.T) {
 	res, err = validateStructure(context.Background(), &discovery.SignedRequest{
 		Payload: b,
 	}, true, extractHash)
+	assert.NoError(t, err)
+	assert.NotNil(t, res)
 }
 
 func TestValidateCCQuery(t *testing.T) {

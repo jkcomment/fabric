@@ -113,7 +113,7 @@ func GenerateLocalMSP(
 	}
 
 	// generate config.yaml if required
-	if nodeOUs && (nodeType == PEER || nodeType == ORDERER) {
+	if nodeOUs {
 
 		exportConfig(mspDir, filepath.Join("cacerts", x509Filename(signCA.Name)), true)
 	}
@@ -125,9 +125,11 @@ func GenerateLocalMSP(
 	// cleared up anyway by copyAdminCert, but
 	// we leave a valid admin for now for the sake
 	// of unit tests
-	err = x509Export(filepath.Join(mspDir, "admincerts", x509Filename(name)), cert)
-	if err != nil {
-		return err
+	if !nodeOUs {
+		err = x509Export(filepath.Join(mspDir, "admincerts", x509Filename(name)), cert)
+		if err != nil {
+			return err
+		}
 	}
 
 	/*
@@ -161,7 +163,7 @@ func GenerateLocalMSP(
 
 	// rename the generated TLS X509 cert
 	tlsFilePrefix := "server"
-	if nodeType == CLIENT {
+	if nodeType == CLIENT || nodeType == ADMIN {
 		tlsFilePrefix = "client"
 	}
 	err = os.Rename(filepath.Join(tlsDir, x509Filename(name)),
@@ -217,6 +219,10 @@ func GenerateVerifyingMSP(
 	// cleared up anyway by copyAdminCert, but
 	// we leave a valid admin for now for the sake
 	// of unit tests
+	if nodeOUs {
+		return nil
+	}
+
 	ksDir := filepath.Join(baseDir, "keystore")
 	err = os.Mkdir(ksDir, 0755)
 	defer os.RemoveAll(ksDir)

@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package ledger
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -19,16 +20,16 @@ import (
 	. "github.com/onsi/gomega"
 
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
-	"github.com/hyperledger/fabric/protos/common"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
 	"github.com/tedsuo/ifrit"
 	"gopkg.in/yaml.v2"
 )
 
-var _ bool = Describe("Rollback & Reset Ledger", func() {
+var _ = Describe("rollback, reset, pause and resume peer node commands", func() {
 	// at the beginning of each test under this block, we have defined two collections:
 	// 1. collectionMarbles - Org1 and Org2 have access to this collection
 	// 2. collectionMarblePrivateDetails - Org2 and Org3 have access to this collection
@@ -41,13 +42,14 @@ var _ bool = Describe("Rollback & Reset Ledger", func() {
 
 	BeforeEach(func() {
 		setup = initThreeOrgsSetup()
+		nwo.EnableCapabilities(setup.network, setup.channelID, "Application", "V2_0", setup.orderer, setup.peers...)
 		helper = &testHelper{
 			networkHelper: &networkHelper{
 				Network:   setup.network,
 				orderer:   setup.orderer,
 				peers:     setup.peers,
 				testDir:   setup.testDir,
-				channelID: "testchannel",
+				channelID: setup.channelID,
 			},
 		}
 
@@ -55,8 +57,8 @@ var _ bool = Describe("Rollback & Reset Ledger", func() {
 		chaincode := nwo.Chaincode{
 			Name:              "marblesp",
 			Version:           "1.0",
-			Path:              "github.com/hyperledger/fabric/integration/chaincode/marbles_private/cmd",
-			Lang:              "golang",
+			Path:              components.Build("github.com/hyperledger/fabric/integration/chaincode/marbles_private/cmd"),
+			Lang:              "binary",
 			PackageFile:       filepath.Join(setup.testDir, "marbles-pvtdata.tar.gz"),
 			Label:             "marbles-private-20",
 			SignaturePolicy:   `OR ('Org1MSP.member','Org2MSP.member', 'Org3MSP.member')`,
@@ -71,7 +73,7 @@ var _ bool = Describe("Rollback & Reset Ledger", func() {
 
 		By("creating 5 blocks")
 		for i := 1; i <= 5; i++ {
-			helper.addMarble("marblesp", fmt.Sprintf(`"marble%d", "blue", "35", "tom", "99"`, i), org2peer0)
+			helper.addMarble("marblesp", fmt.Sprintf(`{"name":"marble%d", "color":"blue", "size":35, "owner":"tom", "price":99}`, i), org2peer0)
 			helper.waitUntilEqualLedgerHeight(height + i)
 		}
 
@@ -80,81 +82,116 @@ var _ bool = Describe("Rollback & Reset Ledger", func() {
 			helper.assertPresentInCollectionM("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
 			helper.assertPresentInCollectionMPD("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
 		}
-
 	})
 
 	AfterEach(func() {
 		setup.cleanup()
 	})
 
-	assertPostRollbackOrReset := func() {
-		org2peer0 := setup.network.Peer("org2", "peer0")
-
-		By("verifying that the endorsement is disabled")
-		setup.startPeer(org2peer0)
-		helper.assertDisabledEndorser("marblesp", org2peer0)
-
-		By("bringing the peer0.org2 to recent height by starting the orderer")
-		setup.startBrokerAndOrderer()
-		helper.waitUntilEndorserEnabled(org2peer0)
-
-		By("verifying marble1 to marble5 exist in collectionMarbles & collectionMarblePrivateDetails in peer0.org2")
-		for i := 1; i <= 5; i++ {
-			helper.assertPresentInCollectionM("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
-			helper.assertPresentInCollectionMPD("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
+	// This test executes the rollback, reset, pause, and resume commands on the following peerss
+	// org1.peer0 - rollback
+	// org2.peer0 - reset
+	// org3.peer0 - pause/rollback/resume
+	//
+	// There are 14 blocks created in BeforeEach (before rollback/reset).
+	// block 0: genesis, block 1: org1Anchor, block 2: org2Anchor, block 3: org3Anchor
+	// block 4 to 8: chaincode instantiation, block 9 to 13: chaincode invoke to add marbles.
+	It("pauses and resumes channels and rolls back and resets the ledger", func() {
+		By("Checking ledger height on each peer")
+		for _, peer := range helper.peers {
+			Expect(helper.getLedgerHeight(peer)).Should(Equal(14))
 		}
 
-		By("starting org1 and org3 peer")
-		setup.startPeer(setup.peers[0])
-		setup.startPeer(setup.peers[2])
+		org1peer0 := setup.network.Peer("org1", "peer0")
+		org2peer0 := setup.network.Peer("org2", "peer0")
+		org3peer0 := setup.network.Peer("org3", "peer0")
+
+		// Negative test: rollback, reset, pause, and resume should fail when the peer is online
+		expectedErrMessage := "as another peer node command is executing," +
+			" wait for that command to complete its execution or terminate it before retrying"
+		By("Rolling back the peer to block 6 from block 13 while the peer node is online")
+		helper.rollback(org1peer0, 6, expectedErrMessage, false)
+		By("Resetting the peer to the genesis block while the peer node is online")
+		helper.reset(org2peer0, expectedErrMessage, false)
+		By("Pausing the peer while the peer node is online")
+		helper.pause(org3peer0, expectedErrMessage, false)
+		By("Resuming the peer while the peer node is online")
+		helper.resume(org3peer0, expectedErrMessage, false)
+
+		By("Stopping the network to test commands")
+		setup.terminateAllProcess()
+
+		By("Rolling back the channel to block 6 from block 14 on org1peer0")
+		helper.rollback(org1peer0, 6, "", true)
+
+		By("Resetting org2peer0 to the genesis block")
+		helper.reset(org2peer0, "", true)
+
+		By("Pausing the channel on org3peer0")
+		helper.pause(org3peer0, "", true)
+
+		By("Rolling back the paused channel to block 6 from block 14 on org3peer0")
+		helper.rollback(org3peer0, 6, "", true)
+
+		By("Verifying paused channel is not found upon peer restart")
+		setup.startPeer(org3peer0)
+		helper.assertPausedChannel(org3peer0)
+
+		By("Checking preResetHeightFile exists for a paused channel that is also rolled back or reset")
+		setup.startBrokerAndOrderer()
+		preResetHeightFile := filepath.Join(setup.network.PeerLedgerDir(org3peer0), "chains/chains", helper.channelID, "__preResetHeight")
+		Expect(preResetHeightFile).To(BeARegularFile())
+
+		setup.terminateAllProcess()
+
+		By("Resuming the peer")
+		helper.resume(org3peer0, "", true)
+
+		By("Verifying that the endorsement is disabled when the peer has not received missing blocks")
+		setup.startPeers()
+		for _, peer := range setup.peers {
+			helper.assertDisabledEndorser("marblesp", peer)
+		}
+
+		By("Bringing the peers to recent height by starting the orderer")
+		setup.startBrokerAndOrderer()
+		for _, peer := range setup.peers {
+			By("Verifying endorsement is enabled and preResetHeightFile is removed on peer " + peer.ID())
+			helper.waitUntilEndorserEnabled(peer)
+			preResetHeightFile := filepath.Join(setup.network.PeerLedgerDir(peer), "chains/chains", helper.channelID, "__preResetHeight")
+			Expect(preResetHeightFile).NotTo(BeAnExistingFile())
+		}
+
 		setup.network.VerifyMembership(setup.peers, setup.channelID, "marblesp")
 
-		By("creating 2 more blocks")
+		By("Verifying leger height on all peers")
+		helper.waitUntilEqualLedgerHeight(14)
+
+		// Test chaincode works correctly after the commands
+		By("Creating 2 more blocks post rollback/reset")
 		for i := 6; i <= 7; i++ {
-			helper.addMarble("marblesp", fmt.Sprintf(`"marble%d", "blue", "35", "tom", "99"`, i), org2peer0)
+			helper.addMarble("marblesp", fmt.Sprintf(`{"name":"marble%d", "color":"blue", "size":35, "owner":"tom", "price":99}`, i), org2peer0)
 			helper.waitUntilEqualLedgerHeight(14 + i - 5)
 		}
 
-		By("verifying marble1 to marble7 exist in collectionMarbles & collectionMarblePrivateDetails in peer0.org2")
+		By("Verifying marble1 to marble7 exist in collectionMarbles & collectionMarblePrivateDetails on org2peer0")
 		for i := 1; i <= 7; i++ {
 			helper.assertPresentInCollectionM("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
 			helper.assertPresentInCollectionMPD("marblesp", fmt.Sprintf("marble%d", i), org2peer0)
 		}
 
-	}
-
-	It("rolls back the ledger to a past block", func() {
-		org2peer0 := setup.network.Peer("org2", "peer0")
-		// block 0: genesis, block 1: org1Anchor, block 2: org2Anchor, block 3: org3Anchor
-		// block 4 to 8: chaincode instantiation, block 9 to 13: chaincode invoke to add marbles.
-		By("Rolling back peer0.org2 to block 6 from block 13 while the peer node is online")
-		expectedErrMessage := "as another peer node command is executing," +
-			" wait for that command to complete its execution or terminate it before retrying"
-		helper.rollback(org2peer0, 6, expectedErrMessage, false)
-
-		By("Rolling back peer0.org2 to block 6 from block 13 while the peer node is offline")
-		Expect(helper.getLedgerHeight(org2peer0)).Should(Equal(14))
-		setup.terminateAllProcess()
-		helper.rollback(org2peer0, 6, "", true)
-
-		assertPostRollbackOrReset()
+		// statedb rebuild test
+		By("Stopping peers and deleting the statedb folder on peer org2.peer0")
+		peer := setup.network.Peer("org2", "peer0")
+		setup.stopPeers()
+		dbPath := filepath.Join(setup.network.PeerLedgerDir(peer), "stateLeveldb")
+		Expect(os.RemoveAll(dbPath)).NotTo(HaveOccurred())
+		Expect(dbPath).NotTo(BeADirectory())
+		By("Restarting the peer org2.peer0")
+		setup.startPeer(peer)
+		Expect(dbPath).To(BeADirectory())
+		helper.assertPresentInCollectionM("marblesp", "marble2", peer)
 	})
-
-	It("resets the ledger to the genesis block", func() {
-		org2peer0 := setup.network.Peer("org2", "peer0")
-		By("Resetting peer0.org2 to the genesis block while the peer node is online")
-		expectedErrMessage := "as another peer node command is executing," +
-			" wait for that command to complete its execution or terminate it before retrying"
-		helper.reset(org2peer0, expectedErrMessage, false)
-
-		By("Resetting peer0.org2 to the genesis block while the peer node is offline")
-		Expect(helper.getLedgerHeight(org2peer0)).Should(Equal(14))
-		setup.terminateAllProcess()
-		helper.reset(org2peer0, "", true)
-
-		assertPostRollbackOrReset()
-	})
-
 })
 
 type setup struct {
@@ -211,8 +248,6 @@ func initThreeOrgsSetup() *setup {
 	n.UpdateChannelAnchors(orderer, "testchannel")
 	setup.orderer = orderer
 
-	nwo.EnableCapabilities(n, "testchannel", "Application", "V2_0", orderer, peers...)
-
 	By("verifying membership")
 	setup.network.VerifyMembership(setup.peers, setup.channelID)
 
@@ -241,6 +276,20 @@ func (s *setup) terminateAllProcess() {
 	s.peerProcess = nil
 }
 
+func (s *setup) startPeers() {
+	for _, peer := range s.peers {
+		s.startPeer(peer)
+	}
+}
+
+func (s *setup) stopPeers() {
+	for _, p := range s.peerProcess {
+		p.Signal(syscall.SIGTERM)
+		Eventually(p.Wait(), s.network.EventuallyTimeout).Should(Receive())
+	}
+	s.peerProcess = nil
+}
+
 func (s *setup) startPeer(peer *nwo.Peer) {
 	peerRunner := s.network.PeerRunner(peer)
 	peerProcess := ifrit.Invoke(peerRunner)
@@ -249,6 +298,7 @@ func (s *setup) startPeer(peer *nwo.Peer) {
 }
 
 func (s *setup) startBrokerAndOrderer() {
+
 	brokerRunner := s.network.BrokerGroupRunner()
 	brokerProcess := ifrit.Invoke(brokerRunner)
 	Eventually(brokerProcess.Ready(), s.network.EventuallyTimeout).Should(BeClosed())
@@ -290,7 +340,8 @@ func (nh *networkHelper) getLedgerHeight(peer *nwo.Peer) int {
 
 	channelInfoStr := strings.TrimPrefix(string(sess.Buffer().Contents()[:]), "Blockchain info:")
 	var channelInfo = common.BlockchainInfo{}
-	json.Unmarshal([]byte(channelInfoStr), &channelInfo)
+	err = json.Unmarshal([]byte(channelInfoStr), &channelInfo)
+	Expect(err).NotTo(HaveOccurred())
 	return int(channelInfo.Height)
 }
 
@@ -301,7 +352,7 @@ func (nh *networkHelper) queryChaincode(peer *nwo.Peer, command commands.Chainco
 		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(0))
 		Expect(sess).To(gbytes.Say(expectedMessage))
 	} else {
-		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit())
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(1))
 		Expect(sess.Err).To(gbytes.Say(expectedMessage))
 	}
 }
@@ -320,7 +371,7 @@ func (nh *networkHelper) rollback(peer *nwo.Peer, blockNumber int, expectedErrMe
 	if expectSuccess {
 		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(0))
 	} else {
-		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit())
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(1))
 		Expect(sess.Err).To(gbytes.Say(expectedErrMessage))
 	}
 }
@@ -332,7 +383,31 @@ func (nh *networkHelper) reset(peer *nwo.Peer, expectedErrMessage string, expect
 	if expectSuccess {
 		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(0))
 	} else {
-		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit())
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(1))
+		Expect(sess.Err).To(gbytes.Say(expectedErrMessage))
+	}
+}
+
+func (nh *networkHelper) pause(peer *nwo.Peer, expectedErrMessage string, expectSuccess bool) {
+	pauseCmd := commands.NodePause{ChannelID: nh.channelID}
+	sess, err := nh.PeerUserSession(peer, "User1", pauseCmd)
+	Expect(err).NotTo(HaveOccurred())
+	if expectSuccess {
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(0))
+	} else {
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(1))
+		Expect(sess.Err).To(gbytes.Say(expectedErrMessage))
+	}
+}
+
+func (nh *networkHelper) resume(peer *nwo.Peer, expectedErrMessage string, expectSuccess bool) {
+	resumeCmd := commands.NodeResume{ChannelID: nh.channelID}
+	sess, err := nh.PeerUserSession(peer, "User1", resumeCmd)
+	Expect(err).NotTo(HaveOccurred())
+	if expectSuccess {
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(0))
+	} else {
+		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit(1))
 		Expect(sess.Err).To(gbytes.Say(expectedErrMessage))
 	}
 }
@@ -345,7 +420,7 @@ func (nh *networkHelper) waitUntilEndorserEnabled(peer *nwo.Peer) {
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(sess, nh.EventuallyTimeout).Should(gexec.Exit())
 		return sess.Buffer()
-	}, "60s", "2s").Should(gbytes.Say("Blockchain info"))
+	}, nh.EventuallyTimeout).Should(gbytes.Say("Blockchain info"))
 }
 
 type testHelper struct {
@@ -353,11 +428,14 @@ type testHelper struct {
 }
 
 func (th *testHelper) addMarble(chaincodeName, marbleDetails string, peer *nwo.Peer) {
+	marbleDetailsBase64 := base64.StdEncoding.EncodeToString([]byte(marbleDetails))
+
 	command := commands.ChaincodeInvoke{
 		ChannelID: th.channelID,
 		Orderer:   th.OrdererAddress(th.orderer, nwo.ListenPort),
 		Name:      chaincodeName,
-		Ctor:      fmt.Sprintf(`{"Args":["initMarble",%s]}`, marbleDetails),
+		Ctor:      `{"Args":["initMarble"]}`,
+		Transient: fmt.Sprintf(`{"marble":"%s"}`, marbleDetailsBase64),
 		PeerAddresses: []string{
 			th.PeerAddress(peer, nwo.ListenPort),
 		},
@@ -402,4 +480,13 @@ func (th *testHelper) assertDisabledEndorser(chaincodeName string, peer *nwo.Pee
 	}
 	expectedMsg := "endorse requests are blocked while ledgers are being rebuilt"
 	th.queryChaincode(peer, command, expectedMsg, false)
+}
+
+func (th *testHelper) assertPausedChannel(peer *nwo.Peer) {
+	sess, err := th.PeerUserSession(peer, "User1", commands.ChannelInfo{
+		ChannelID: th.channelID,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(sess, th.EventuallyTimeout).Should(gexec.Exit(1))
+	Expect(sess.Err).To(gbytes.Say("Invalid chain ID"))
 }

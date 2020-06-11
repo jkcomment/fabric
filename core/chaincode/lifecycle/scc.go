@@ -10,20 +10,19 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/hyperledger/fabric-chaincode-go/shim"
+	"github.com/hyperledger/fabric-protos-go/common"
+	mspprotos "github.com/hyperledger/fabric-protos-go/msp"
+	pb "github.com/hyperledger/fabric-protos-go/peer"
+	lb "github.com/hyperledger/fabric-protos-go/peer/lifecycle"
 	"github.com/hyperledger/fabric/common/cauthdsl"
 	"github.com/hyperledger/fabric/common/chaincode"
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
-	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/dispatcher"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/msp"
-	"github.com/hyperledger/fabric/protos/common"
-	cb "github.com/hyperledger/fabric/protos/common"
-	mspprotos "github.com/hyperledger/fabric/protos/msp"
-	pb "github.com/hyperledger/fabric/protos/peer"
-	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
@@ -50,6 +49,10 @@ const (
 	// ApproveChaincodeDefinitionForMyOrgFuncName is the chaincode function name
 	// used to approve a chaincode definition for execution by the user's own org
 	ApproveChaincodeDefinitionForMyOrgFuncName = "ApproveChaincodeDefinitionForMyOrg"
+
+	// QueryApprovedChaincodeDefinitionFuncName is the chaincode function name used to
+	// query a approved chaincode definition for the user's own org
+	QueryApprovedChaincodeDefinitionFuncName = "QueryApprovedChaincodeDefinition"
 
 	// CheckCommitReadinessFuncName is the chaincode function name used to check
 	// a specified chaincode definition is ready to be committed. It returns the
@@ -87,6 +90,9 @@ type SCCFunctions interface {
 
 	// ApproveChaincodeDefinitionForOrg records a chaincode definition into this org's implicit collection.
 	ApproveChaincodeDefinitionForOrg(chname, ccname string, cd *ChaincodeDefinition, packageID string, publicState ReadableState, orgState ReadWritableState) error
+
+	// QueryApprovedChaincodeDefinition returns a approved chaincode definition from this org's implicit collection.
+	QueryApprovedChaincodeDefinition(chname, ccname string, sequence int64, publicState ReadableState, orgState ReadableState) (*ApprovedChaincodeDefinition, error)
 
 	// CheckCommitReadiness returns a map containing the orgs
 	// whose orgStates were supplied and whether or not they have approved
@@ -355,10 +361,10 @@ func (i *Invocation) QueryInstalledChaincodes(input *lb.QueryInstalledChaincodes
 // to which routes to the underlying lifecycle implementation.
 func (i *Invocation) ApproveChaincodeDefinitionForMyOrg(input *lb.ApproveChaincodeDefinitionForMyOrgArgs) (proto.Message, error) {
 	if err := i.validateInput(input.Name, input.Version, input.Collections); err != nil {
-		return nil, err
+		return nil, errors.WithMessage(err, "error validating chaincode definition")
 	}
 	collectionName := ImplicitCollectionNameForOrg(i.SCC.OrgMSPID)
-	var collectionConfig []*cb.CollectionConfig
+	var collectionConfig []*pb.CollectionConfig
 	if input.Collections != nil {
 		collectionConfig = input.Collections.Config
 	}
@@ -384,7 +390,7 @@ func (i *Invocation) ApproveChaincodeDefinitionForMyOrg(input *lb.ApproveChainco
 			ValidationPlugin:    input.ValidationPlugin,
 			ValidationParameter: input.ValidationParameter,
 		},
-		Collections: &cb.CollectionConfigPackage{
+		Collections: &pb.CollectionConfigPackage{
 			Config: collectionConfig,
 		},
 	}
@@ -408,6 +414,41 @@ func (i *Invocation) ApproveChaincodeDefinitionForMyOrg(input *lb.ApproveChainco
 		return nil, err
 	}
 	return &lb.ApproveChaincodeDefinitionForMyOrgResult{}, nil
+}
+
+// QueryApprovedChaincodeDefinition is a SCC function that may be dispatched
+// to which routes to the underlying lifecycle implementation.
+func (i *Invocation) QueryApprovedChaincodeDefinition(input *lb.QueryApprovedChaincodeDefinitionArgs) (proto.Message, error) {
+	logger.Debugf("received invocation of QueryApprovedChaincodeDefinition on channel '%s' for chaincode '%s'",
+		i.Stub.GetChannelID(),
+		input.Name,
+	)
+	collectionName := ImplicitCollectionNameForOrg(i.SCC.OrgMSPID)
+
+	ca, err := i.SCC.Functions.QueryApprovedChaincodeDefinition(
+		i.Stub.GetChannelID(),
+		input.Name,
+		input.Sequence,
+		i.Stub,
+		&ChaincodePrivateLedgerShim{
+			Collection: collectionName,
+			Stub:       i.Stub,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &lb.QueryApprovedChaincodeDefinitionResult{
+		Sequence:            ca.Sequence,
+		Version:             ca.EndorsementInfo.Version,
+		EndorsementPlugin:   ca.EndorsementInfo.EndorsementPlugin,
+		ValidationPlugin:    ca.ValidationInfo.ValidationPlugin,
+		ValidationParameter: ca.ValidationInfo.ValidationParameter,
+		InitRequired:        ca.EndorsementInfo.InitRequired,
+		Collections:         ca.Collections,
+		Source:              ca.Source,
+	}, nil
 }
 
 // CheckCommitReadiness is a SCC function that may be dispatched
@@ -457,7 +498,7 @@ func (i *Invocation) CheckCommitReadiness(input *lb.CheckCommitReadinessArgs) (p
 // to which routes to the underlying lifecycle implementation.
 func (i *Invocation) CommitChaincodeDefinition(input *lb.CommitChaincodeDefinitionArgs) (proto.Message, error) {
 	if err := i.validateInput(input.Name, input.Version, input.Collections); err != nil {
-		return nil, err
+		return nil, errors.WithMessage(err, "error validating chaincode definition")
 	}
 
 	if i.ApplicationConfig == nil {
@@ -514,6 +555,8 @@ func (i *Invocation) CommitChaincodeDefinition(input *lb.CommitChaincodeDefiniti
 	if !approvals[myOrg] {
 		return nil, errors.Errorf("chaincode definition not agreed to by this org (%s)", i.SCC.OrgMSPID)
 	}
+
+	logger.Infof("Successfully endorsed commit for chaincode name '%s' on channel '%s' with definition {%s}", input.Name, i.Stub.GetChannelID(), cd)
 
 	return &lb.CommitChaincodeDefinitionResult{}, nil
 }
@@ -610,7 +653,7 @@ var (
 	}
 )
 
-func (i *Invocation) validateInput(name, version string, collections *cb.CollectionConfigPackage) error {
+func (i *Invocation) validateInput(name, version string, collections *pb.CollectionConfigPackage) error {
 	if !ChaincodeNameRegExp.MatchString(name) {
 		return errors.Errorf("invalid chaincode name '%s'. Names can only consist of alphanumerics, '_', and '-' and can only begin with alphanumerics", name)
 	}
@@ -660,14 +703,14 @@ func (i *Invocation) validateInput(name, version string, collections *cb.Collect
 	return nil
 }
 
-func extractStaticCollectionConfigs(collConfigPkg *common.CollectionConfigPackage) ([]*common.StaticCollectionConfig, error) {
+func extractStaticCollectionConfigs(collConfigPkg *pb.CollectionConfigPackage) ([]*pb.StaticCollectionConfig, error) {
 	if collConfigPkg == nil || len(collConfigPkg.Config) == 0 {
 		return nil, nil
 	}
-	collConfigs := make([]*common.StaticCollectionConfig, len(collConfigPkg.Config))
+	collConfigs := make([]*pb.StaticCollectionConfig, len(collConfigPkg.Config))
 	for i, c := range collConfigPkg.Config {
 		switch t := c.Payload.(type) {
-		case *cb.CollectionConfig_StaticCollectionConfig:
+		case *pb.CollectionConfig_StaticCollectionConfig:
 			collConfig := t.StaticCollectionConfig
 			if collConfig == nil {
 				return nil, errors.Errorf("collection configuration is empty")
@@ -682,7 +725,7 @@ func extractStaticCollectionConfigs(collConfigPkg *common.CollectionConfigPackag
 	return collConfigs, nil
 }
 
-func validateCollectionConfigs(collConfigs []*common.StaticCollectionConfig, mspMgr msp.MSPManager) error {
+func validateCollectionConfigs(collConfigs []*pb.StaticCollectionConfig, mspMgr msp.MSPManager) error {
 	if len(collConfigs) == 0 {
 		return nil
 	}
@@ -701,7 +744,7 @@ func validateCollectionConfigs(collConfigs []*common.StaticCollectionConfig, msp
 		collNamesMap[c.Name] = struct{}{}
 		// Validate gossip related parameters present in the collection config
 		if c.MaximumPeerCount < c.RequiredPeerCount {
-			return errors.Errorf("collection-name: %s -- maximum peer count (%d) cannot be greater than the required peer count (%d)",
+			return errors.Errorf("collection-name: %s -- maximum peer count (%d) cannot be less than the required peer count (%d)",
 				c.Name, c.MaximumPeerCount, c.RequiredPeerCount)
 		}
 		if c.RequiredPeerCount < 0 {
@@ -717,7 +760,7 @@ func validateCollectionConfigs(collConfigs []*common.StaticCollectionConfig, msp
 
 // validateCollectionConfigAgainstMsp checks whether the supplied collection configuration
 // complies to the given msp configuration
-func validateCollectionConfigMemberOrgsPolicy(coll *common.StaticCollectionConfig, mspMgr msp.MSPManager) error {
+func validateCollectionConfigMemberOrgsPolicy(coll *pb.StaticCollectionConfig, mspMgr msp.MSPManager) error {
 	if coll.MemberOrgsPolicy == nil {
 		return errors.Errorf("collection member policy is not set for collection '%s'", coll.Name)
 	}
@@ -806,8 +849,8 @@ func validateSpOrConcat(sp *common.SignaturePolicy) error {
 }
 
 func validateCollConfigsAgainstCommittedDef(
-	proposedCollConfs []*common.StaticCollectionConfig,
-	committedCollConfPkg *common.CollectionConfigPackage,
+	proposedCollConfs []*pb.StaticCollectionConfig,
+	committedCollConfPkg *pb.CollectionConfigPackage,
 ) error {
 	if committedCollConfPkg == nil || len(committedCollConfPkg.Config) == 0 {
 		return nil
@@ -817,7 +860,7 @@ func validateCollConfigsAgainstCommittedDef(
 		return errors.Errorf("the proposed collection config does not contain previously defined collections")
 	}
 
-	proposedCollsMap := map[string]*common.StaticCollectionConfig{}
+	proposedCollsMap := map[string]*pb.StaticCollectionConfig{}
 	for _, c := range proposedCollConfs {
 		proposedCollsMap[c.Name] = c
 	}

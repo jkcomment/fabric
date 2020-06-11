@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package committer
 
 import (
+	"github.com/hyperledger/fabric-protos-go/common"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/protos/common"
 )
 
 var logger = flogging.MustGetLogger("committer")
@@ -28,7 +28,7 @@ type PeerLedgerSupport interface {
 
 	CommitLegacy(blockAndPvtdata *ledger.BlockAndPvtData, commitOpts *ledger.CommitOptions) error
 
-	CommitPvtDataOfOldBlocks(blockPvtData []*ledger.BlockPvtData) ([]*ledger.PvtdataHashMismatch, error)
+	CommitPvtDataOfOldBlocks(reconciledPvtdata []*ledger.ReconciledPvtdata) ([]*ledger.PvtdataHashMismatch, error)
 
 	GetBlockchainInfo() (*common.BlockchainInfo, error)
 
